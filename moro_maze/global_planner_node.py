@@ -42,6 +42,8 @@ class GlobalPlannerNode(Node):
         self.get_logger().info('global_planner_node alive')
 
     def map_callback(self, msg):
+        # Receive the static maze map once and convert it into a helper grid structure
+        # that the planner can query in grid coordinates.
         if self.grid_map is None:
             threshold = int(self.get_parameter('occupied_threshold').value)
             self.grid_map = GridMap.from_msg(msg, occupied_threshold=threshold)
@@ -52,16 +54,26 @@ class GlobalPlannerNode(Node):
             self.try_plan_test_path()
 
     def pose_callback(self, msg):
+        # Store the current estimated robot position in world coordinates.
+        # As soon as both map and pose exist, planning can start.
         self.robot_pose = (msg.pose.position.x, msg.pose.position.y)
         self.try_plan_test_path()
 
     def try_plan_test_path(self):
+        # Wait until the planner has the two required inputs:
+        # 1) the maze map and 2) the current estimated robot pose.
         if self.grid_map is None or self.robot_pose is None or self.has_logged_plan:
             return
 
+        # Convert the robot world pose into a grid cell so the graph search runs
+        # directly on map indices.
         start = self.grid_map.world_to_grid(self.robot_pose[0], self.robot_pose[1])
+
+        # If the estimated pose lands on an occupied/invalid cell, snap it to the
+        # nearest free cell so planning can still proceed.
         start = self.grid_map.nearest_free_cell(*start)
 
+        # Detect exits automatically from free runs on the map border.
         exits = self.grid_map.detect_border_exits(
             minimum_run=int(self.get_parameter('minimum_exit_run').value)
         )
@@ -76,6 +88,7 @@ class GlobalPlannerNode(Node):
         best_goal = None
         best_path = []
 
+        # Try A* to every detected exit and keep the shortest valid solution.
         for exit_cell in exits:
             goal = self.grid_map.nearest_free_cell(*exit_cell)
             path = astar_search(self.grid_map, start, goal, connectivity=connectivity)
@@ -92,6 +105,9 @@ class GlobalPlannerNode(Node):
 
         self.has_logged_plan = True
         raw_length = len(best_path)
+
+        # Optional post-processing step: remove unnecessary intermediate waypoints
+        # when there is direct line of sight through free space.
         if bool(self.get_parameter('smooth_path').value):
             best_path = shortcut_smooth_path(self.grid_map, best_path)
 
@@ -106,6 +122,8 @@ class GlobalPlannerNode(Node):
         self.publish_path(best_path)
 
     def publish_path(self, path_cells):
+        # Convert the final grid path back into world coordinates and publish it
+        # as a ROS Path for the future local controller.
         msg = Path()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -113,6 +131,7 @@ class GlobalPlannerNode(Node):
         for gx, gy in path_cells:
             pose = PoseStamped()
             pose.header = msg.header
+            # Each grid cell center becomes one waypoint in world coordinates.
             wx, wy = self.grid_map.grid_to_world(gx, gy)
             pose.pose.position.x = float(wx)
             pose.pose.position.y = float(wy)
