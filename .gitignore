@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.ipynb_checkpoints/
+
+build/
+install/
+log/
+
+*.bag
+*.db3
+
+.DS_Store
