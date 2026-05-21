@@ -414,6 +414,9 @@ Paso 8 - Implementar A* sobre el mapa
 Objetivo:
 Tener un planificador global real y automatico.
 
+Estado actual:
+Implementado en version de prueba con meta fija.
+
 Que hacer:
 - Construir la grilla navegable desde `OccupancyGrid`.
 - Aplicar inflado de obstaculos.
@@ -428,9 +431,33 @@ Como verificar:
 Condicion para cerrar este paso:
 A* funciona sobre la grilla del mapa.
 
+Resultado esperado al cerrar:
+- Existe implementacion de `astar_search`.
+- Se usa la grilla libre derivada de `OccupancyGrid`.
+- Se reconstruye un camino en celdas desde inicio hasta meta.
+- `global_planner_node` puede resolver un path de prueba hacia una meta fija.
+
+Test de Paso 8:
+1. `colcon build --packages-select moro_maze`
+2. `source install/setup.bash`
+3. `ros2 launch moro_maze simulation_launch.py use_gzclient:=true`
+4. Buscar en logs de `global_planner_node` una de estas lineas:
+   - `astar test success:`
+   - `astar test failed:`
+5. Si sale success, verificar que tambien aparezca:
+   - `astar first-last cells:`
+6. Probar tambien una meta fija distinta, por ejemplo:
+   - `ros2 launch moro_maze simulation_launch.py use_gzclient:=true`
+   - luego en proximo ajuste podremos cambiar `test_goal_x/y` por parametro si hace falta
+
+Si A* encuentra un camino valido en la grilla del mapa, Paso 8 queda aprobado.
+
 Paso 9 - Detectar salidas del laberinto automaticamente
 Objetivo:
 No hardcodear la meta.
+
+Estado actual:
+Implementado con deteccion de salidas libres sobre el borde del mapa.
 
 Que hacer:
 - Buscar tramos libres en el borde del mapa.
@@ -444,9 +471,33 @@ Como verificar:
 Condicion para cerrar este paso:
 La meta se obtiene automaticamente desde el mapa.
 
+Resultado esperado al cerrar:
+- Ya no se usa una meta fija de prueba.
+- `global_planner_node` detecta salidas candidatas en el borde del mapa.
+- Se elige una salida alcanzable automaticamente.
+- Se loguean las salidas detectadas y el mejor camino encontrado.
+
+Test de Paso 9:
+1. `colcon build --packages-select moro_maze`
+2. `source install/setup.bash`
+3. Lanzar guardando salida en archivo:
+   - `ros2 launch moro_maze simulation_launch.py use_gzclient:=true 2>&1 | tee step9_output.txt`
+4. Buscar en terminal o en `step9_output.txt` estas lineas:
+   - `detected exits:`
+   - `astar exit success:` o `astar exit test failed:`
+   - `astar first-last cells:` si hubo exito
+5. Para revisar luego con Ctrl+F:
+   - abrir `step9_output.txt`
+   - buscar `global_planner_node`
+   - buscar `detected exits`
+6. Si detecta salidas y elige una alcanzable automaticamente, Paso 9 queda aprobado.
+
 Paso 10 - Publicar path global en coordenadas mundo
 Objetivo:
 Cumplir exactamente la exigencia del profesor para el controlador.
+
+Estado actual:
+Implementado en forma basica.
 
 Que hacer:
 - Convertir la ruta de celdas a `nav_msgs/Path`.
@@ -460,9 +511,37 @@ Como verificar:
 Condicion para cerrar este paso:
 El planner publica un camino world-coordinate correcto.
 
+Resultado esperado al cerrar:
+- `global_planner_node` publica `/global_path`.
+- El mensaje es `nav_msgs/Path`.
+- El frame es `map`.
+- Cada waypoint viene de convertir celdas A* a coordenadas mundo con `grid_to_world`.
+
+Test de Paso 10:
+1. `colcon build --packages-select moro_maze`
+2. `source install/setup.bash`
+3. Lanzar guardando salida:
+   - `ros2 launch moro_maze simulation_launch.py use_gzclient:=true 2>&1 | tee step10_output.txt`
+4. Buscar en terminal o en `step10_output.txt`:
+   - `published global path:`
+5. En otra terminal:
+   - `source /opt/ros2_ws/install/setup.bash`
+   - `ros2 topic echo /global_path --once`
+6. Verificar que:
+   - `header.frame_id` sea `map`
+   - haya varias poses en `poses:`
+7. Para revisar luego con Ctrl+F:
+   - abrir `step10_output.txt`
+   - buscar `published global path`
+
+Si el path sale en `nav_msgs/Path` y en frame `map`, Paso 10 queda aprobado.
+
 Paso 11 - Suavizado opcional del path
 Objetivo:
 Mejorar el seguimiento del controlador.
+
+Estado actual:
+Implementado con shortcut por linea de vista.
 
 Que hacer:
 - Agregar line-of-sight shortcut o suavizado simple.
@@ -473,6 +552,25 @@ Como verificar:
 
 Condicion para cerrar este paso:
 El path es razonable para seguimiento local.
+
+Resultado esperado al cerrar:
+- El planner puede suavizar el path de A*.
+- El suavizado elimina waypoints intermedios cuando hay linea de vista libre.
+- El suavizado se puede activar o desactivar por parametro.
+
+Test de Paso 11:
+1. `colcon build --packages-select moro_maze`
+2. `source install/setup.bash`
+3. Lanzar guardando salida:
+   - `ros2 launch moro_maze simulation_launch.py use_gzclient:=true 2>&1 | tee step11_output.txt`
+4. Buscar en terminal o en `step11_output.txt`:
+   - `path smoothing:`
+   - `published global path:`
+5. Verificar que aparezca algo como:
+   - `raw_waypoints=... smoothed_waypoints=...`
+6. Si `smoothed_waypoints <= raw_waypoints`, el suavizado esta actuando.
+
+Si el path suavizado queda mas corto o igual y sigue siendo valido, Paso 11 queda aprobado.
 
 Paso 12 - Controlador local minimo
 Objetivo:

@@ -98,3 +98,61 @@ class GridMap:
         delta = occupied - np.array([x, y], dtype=np.float32)
         distances = np.linalg.norm(delta, axis=1)
         return float(np.min(distances))
+
+    def nearest_free_cell(self, gx, gy, max_radius=4):
+        if self.in_bounds(gx, gy) and self.is_free(gx, gy):
+            return gx, gy
+
+        for radius in range(1, max_radius + 1):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    nx = gx + dx
+                    ny = gy + dy
+                    if self.in_bounds(nx, ny) and self.is_free(nx, ny):
+                        return nx, ny
+        return None
+
+    def free_neighbor_cells(self, gx, gy, connectivity=8):
+        if connectivity == 4:
+            moves = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        else:
+            moves = [
+                (-1, 0), (1, 0), (0, -1), (0, 1),
+                (-1, -1), (-1, 1), (1, -1), (1, 1),
+            ]
+
+        neighbors = []
+        for dx, dy in moves:
+            nx = gx + dx
+            ny = gy + dy
+            if self.in_bounds(nx, ny) and self.is_free(nx, ny):
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def detect_border_exits(self, minimum_run=2):
+        exits = []
+
+        def add_runs(cells):
+            run = []
+            for gx, gy in cells:
+                if self.is_free(gx, gy):
+                    run.append((gx, gy))
+                else:
+                    if len(run) >= minimum_run:
+                        exits.append(run[len(run) // 2])
+                    run = []
+            if len(run) >= minimum_run:
+                exits.append(run[len(run) // 2])
+
+        add_runs([(gx, 0) for gx in range(self.width)])
+        add_runs([(gx, self.height - 1) for gx in range(self.width)])
+        add_runs([(0, gy) for gy in range(self.height)])
+        add_runs([(self.width - 1, gy) for gy in range(self.height)])
+
+        unique = []
+        seen = set()
+        for cell in exits:
+            if cell not in seen:
+                seen.add(cell)
+                unique.append(cell)
+        return unique
