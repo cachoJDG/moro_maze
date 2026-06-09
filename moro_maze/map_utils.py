@@ -13,6 +13,7 @@ class GridMap:
         self.occupied_threshold = int(occupied_threshold)
         self.data = np.array(data, dtype=np.int16).reshape((self.height, self.width))
         self._occupied_world_points = None
+        self._free_world_points = None
 
     @classmethod
     def from_msg(cls, msg, occupied_threshold=65):
@@ -89,6 +90,39 @@ class GridMap:
 
         self._occupied_world_points = np.array(world_points, dtype=np.float32)
         return self._occupied_world_points
+
+    def free_world_points(self):
+        if self._free_world_points is not None:
+            return self._free_world_points
+
+        free_indices = np.argwhere((self.data >= 0) & (self.data < self.occupied_threshold))
+        if free_indices.size == 0:
+            self._free_world_points = np.empty((0, 2), dtype=np.float32)
+            return self._free_world_points
+
+        world_points = []
+        for gy, gx in free_indices:
+            world_points.append(self.grid_to_world(int(gx), int(gy)))
+
+        self._free_world_points = np.array(world_points, dtype=np.float32)
+        return self._free_world_points
+
+    def wall_world_points(self):
+        return self.occupied_world_points()
+
+    def knn_dataset(self):
+        free_points = self.free_world_points()
+        wall_points = self.wall_world_points()
+
+        if free_points.size == 0 and wall_points.size == 0:
+            return np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.int8)
+
+        x = np.vstack([free_points, wall_points]).astype(np.float32)
+        y = np.concatenate([
+            np.zeros(len(free_points), dtype=np.int8),
+            np.ones(len(wall_points), dtype=np.int8),
+        ])
+        return x, y
 
     def nearest_obstacle_distance(self, x, y):
         occupied = self.occupied_world_points()

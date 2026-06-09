@@ -5,7 +5,15 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from moro_maze.map_utils import GridMap
-from moro_maze.search_utils import astar_search, shortcut_smooth_path
+from moro_maze.search_utils import (
+    bfs_search,
+    build_graph,
+    expand_path_cells,
+    path_name_cost,
+    path_names_to_cells,
+    reconstruct_path,
+    to_node_name,
+)
 
 
 class GlobalPlannerNode(Node):
@@ -15,9 +23,8 @@ class GlobalPlannerNode(Node):
         self.declare_parameter('pose_topic', '/estimated_pose')
         self.declare_parameter('path_topic', '/global_path')
         self.declare_parameter('occupied_threshold', 65)
-        self.declare_parameter('connectivity', 8)
         self.declare_parameter('minimum_exit_run', 2)
-        self.declare_parameter('smooth_path', True)
+        self.declare_parameter('graph_step', 6)
 
         self.grid_map = None
         self.robot_pose = None
@@ -60,70 +67,83 @@ class GlobalPlannerNode(Node):
         self.try_plan_test_path()
 
     def try_plan_test_path(self):
-        # Wait until the planner has the two required inputs:
-        # 1) the maze map and 2) the current estimated robot pose.
         if self.grid_map is None or self.robot_pose is None or self.has_logged_plan:
             return
 
-        # Convert the robot world pose into a grid cell so the graph search runs
-        # directly on map indices.
         start = self.grid_map.world_to_grid(self.robot_pose[0], self.robot_pose[1])
-
-        # If the estimated pose lands on an occupied/invalid cell, snap it to the
-        # nearest free cell so planning can still proceed.
         start = self.grid_map.nearest_free_cell(*start)
-
-        # Detect exits automatically from free runs on the map border.
         exits = self.grid_map.detect_border_exits(
             minimum_run=int(self.get_parameter('minimum_exit_run').value)
         )
         self.get_logger().info(f'detected exits: {exits}')
 
         if start is None or not exits:
-            self.get_logger().warning(f'astar exit test failed: start={start} exits={exits}')
+            self.get_logger().warning(f'graph search failed before build: start={start} exits={exits}')
             self.has_logged_plan = True
             return
 
-        connectivity = int(self.get_parameter('connectivity').value)
-        best_goal = None
-        best_path = []
+        graph_step = max(1, int(self.get_parameter('graph_step').value))
+        exit_goal_cells = [self.interior_goal_cell(exit_cell, graph_step) for exit_cell in exits]
+        exit_goal_cells = [goal_cell for goal_cell in exit_goal_cells if goal_cell is not None]
 
-        # Try A* to every detected exit and keep the shortest valid solution.
-        for exit_cell in exits:
-            goal = self.grid_map.nearest_free_cell(*exit_cell)
-            path = astar_search(self.grid_map, start, goal, connectivity=connectivity)
-            if path and (not best_path or len(path) < len(best_path)):
-                best_goal = goal
-                best_path = path
+        required_cells = {start, *exit_goal_cells}
+        graph_nodes, graph_edges = build_graph(
+            self.grid_map,
+            required_cells=required_cells,
+            graph_step=graph_step,
+        )
+        start_name = to_node_name(*start)
+        goal_cells = list(dict.fromkeys(exit_goal_cells))
+        goal_names = [to_node_name(*goal_cell) for goal_cell in goal_cells]
 
-        if not best_path:
+        self.get_logger().info(
+            f'graph built: nodes={len(graph_nodes)} edges={len(graph_edges)} '
+            f'start={start_name} graph_step={graph_step}'
+        )
+        if graph_edges:
+            self.get_logger().info(f'graph sample edges: {graph_edges[:10]}')
+
+        best_goal_name = None
+        best_path_names = []
+        best_discovered = []
+
+        for goal_name in goal_names:
+            discovered = bfs_search(start_name, graph_edges, goal_name)
+            path_names = reconstruct_path(discovered, start_name, goal_name)
+            if path_names and (
+                not best_path_names or path_name_cost(path_names) < path_name_cost(best_path_names)
+            ):
+                best_goal_name = goal_name
+                best_path_names = path_names
+                best_discovered = discovered
+
+        if not best_path_names:
             self.get_logger().warning(
-                f'astar exit test failed: start={start} exits={exits} connectivity={connectivity}'
+                f'graph search failed: start={start_name} exits={goal_names} edges={len(graph_edges)}'
             )
             self.has_logged_plan = True
             return
 
         self.has_logged_plan = True
-        raw_length = len(best_path)
-
-        # Optional post-processing step: remove unnecessary intermediate waypoints
-        # when there is direct line of sight through free space.
-        if bool(self.get_parameter('smooth_path').value):
-            best_path = shortcut_smooth_path(self.grid_map, best_path)
+        path_cells = path_names_to_cells(best_path_names)
+        expanded_path_cells = expand_path_cells(path_cells)
 
         self.get_logger().info(
-            f'astar exit success: start={start} goal={best_goal} length={len(best_path)} connectivity={connectivity}'
+            f'bfs exit success: start={start_name} goal={best_goal_name} '
+            f'visited_edges={len(best_discovered)} path_nodes={len(best_path_names)}'
         )
         self.get_logger().info(
-            f'path smoothing: enabled={bool(self.get_parameter("smooth_path").value)} '
-            f'raw_waypoints={raw_length} smoothed_waypoints={len(best_path)}'
+            f'bfs found path: {best_path_names}'
         )
-        self.get_logger().info(f'astar first-last cells: first={best_path[0]} last={best_path[-1]}')
-        self.publish_path(best_path)
+        self.get_logger().info(
+            f'expanded path cells: graph_nodes={len(path_cells)} path_waypoints={len(expanded_path_cells)}'
+        )
+        self.get_logger().info(
+            f'graph first-last cells: first={expanded_path_cells[0]} last={expanded_path_cells[-1]}'
+        )
+        self.publish_path(expanded_path_cells)
 
     def publish_path(self, path_cells):
-        # Convert the final grid path back into world coordinates and publish it
-        # as a ROS Path for the future local controller.
         msg = Path()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -131,7 +151,6 @@ class GlobalPlannerNode(Node):
         for gx, gy in path_cells:
             pose = PoseStamped()
             pose.header = msg.header
-            # Each grid cell center becomes one waypoint in world coordinates.
             wx, wy = self.grid_map.grid_to_world(gx, gy)
             pose.pose.position.x = float(wx)
             pose.pose.position.y = float(wy)
@@ -142,6 +161,23 @@ class GlobalPlannerNode(Node):
         self.get_logger().info(
             f'published global path: waypoints={len(msg.poses)} frame={msg.header.frame_id}'
         )
+
+    def interior_goal_cell(self, exit_cell, graph_step):
+        gx, gy = exit_cell
+        step = max(1, int(graph_step))
+
+        if gx == 0:
+            candidate = (min(self.grid_map.width - 1, gx + step), gy)
+        elif gx == self.grid_map.width - 1:
+            candidate = (max(0, gx - step), gy)
+        elif gy == 0:
+            candidate = (gx, min(self.grid_map.height - 1, gy + step))
+        elif gy == self.grid_map.height - 1:
+            candidate = (gx, max(0, gy - step))
+        else:
+            candidate = (gx, gy)
+
+        return self.grid_map.nearest_free_cell(*candidate, max_radius=step)
 
 
 def main(args=None):

@@ -94,6 +94,7 @@ def generate_launch_description():
         package='moro_maze',
         executable='localisation_node',
         name='localisation_node',
+        prefix='python3',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
     )
@@ -102,6 +103,7 @@ def generate_launch_description():
         package='moro_maze',
         executable='global_planner_node',
         name='global_planner_node',
+        prefix='python3',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
     )
@@ -110,6 +112,7 @@ def generate_launch_description():
         package='moro_maze',
         executable='local_controller_node',
         name='local_controller_node',
+        prefix='python3',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
     )

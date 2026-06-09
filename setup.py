@@ -18,7 +18,7 @@ setup(
         (os.path.join('share', package_name, 'params'), glob(os.path.join('params', '*.yaml'))), # Register nav2 params
         (os.path.join('share', package_name, 'rviz'), glob(os.path.join('rviz', '*.rviz'))), # Register rviz configs
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'scikit-learn'],
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',

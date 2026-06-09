@@ -2,10 +2,40 @@ import math
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+import numpy as np
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.srv import GetMap
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
+
+try:
+    from sklearn.neighbors import KNeighborsClassifier
+except ImportError:
+    class KNeighborsClassifier:
+        def __init__(self, n_neighbors=1):
+            self.n_neighbors = max(1, int(n_neighbors))
+            self._x_train = None
+            self._y_train = None
+
+        def fit(self, x_train, y_train):
+            self._x_train = np.asarray(x_train, dtype=np.float32)
+            self._y_train = np.asarray(y_train, dtype=np.int8)
+            return self
+
+        def predict(self, x_query):
+            x_query = np.asarray(x_query, dtype=np.float32)
+            if self._x_train is None or self._y_train is None:
+                raise RuntimeError('KNeighborsClassifier used before fit()')
+            if x_query.size == 0:
+                return np.empty((0,), dtype=np.int8)
+
+            delta = self._x_train[None, :, :] - x_query[:, None, :]
+            distances = np.sum(delta * delta, axis=2)
+            neighbor_count = min(self.n_neighbors, len(self._x_train))
+            nearest = np.argpartition(distances, neighbor_count - 1, axis=1)[:, :neighbor_count]
+            neighbor_labels = self._y_train[nearest]
+            return (np.sum(neighbor_labels, axis=1) >= (neighbor_count / 2.0)).astype(np.int8)
 
 from moro_maze.map_utils import GridMap
 
@@ -17,28 +47,32 @@ class LocalisationNode(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('pose_topic', '/estimated_pose')
         self.declare_parameter('pose_cov_topic', '/estimated_pose_cov')
+        self.declare_parameter('initial_pose_topic', '/initialpose')
         self.declare_parameter('occupied_threshold', 65)
         self.declare_parameter('scan_downsample_step', 8)
-        self.declare_parameter('spawn_min', 0)
-        self.declare_parameter('spawn_max', 3)
-        self.declare_parameter('theta_samples', 16)
-        self.declare_parameter('refine_xy_step', 0.1)
-        self.declare_parameter('refine_xy_radius', 0.2)
-        self.declare_parameter('refine_theta_step', 0.2)
-        self.declare_parameter('refine_theta_radius', 0.4)
-        self.declare_parameter('tracking_log_period_scans', 20)
+        self.declare_parameter('knn_neighbors', 1)
+        self.declare_parameter('map_service', '/map_server/map')
+        self.declare_parameter('map_service_timeout_sec', 5.0)
 
         self.grid_map = None
+        self.knn_model = None
+        self.scan_subscription = None
+        self.map_request_future = None
+        self.map_loaded = False
         self.received_scan_once = False
-        self.initial_pose_done = False
-        self.latest_points = []
-        self.estimated_pose = None
-        self.scan_counter = 0
+        self.map_array = None
+        self.free_positions = np.empty((0, 2), dtype=np.float32)
+        self.wall_positions = np.empty((0, 2), dtype=np.float32)
+        self.knn_x = np.empty((0, 2), dtype=np.float32)
+        self.knn_y = np.empty((0,), dtype=np.int8)
+        self.candidate_poses = []
+        self.pose_scores = {}
 
-        map_topic = self.get_parameter('map_topic').value
         scan_topic = self.get_parameter('scan_topic').value
         pose_topic = self.get_parameter('pose_topic').value
         pose_cov_topic = self.get_parameter('pose_cov_topic').value
+        initial_pose_topic = self.get_parameter('initial_pose_topic').value
+        map_service = self.get_parameter('map_service').value
 
         latched_qos = QoSProfile(depth=1)
         latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -46,17 +80,54 @@ class LocalisationNode(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, pose_topic, latched_qos)
         self.pose_cov_pub = self.create_publisher(PoseWithCovarianceStamped, pose_cov_topic, latched_qos)
+        self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, initial_pose_topic, 10)
 
-        self.create_subscription(OccupancyGrid, map_topic, self.map_callback, latched_qos)
-        self.create_subscription(LaserScan, scan_topic, self.scan_callback, 10)
+        self.map_client = self.create_client(GetMap, map_service)
+        self.scan_topic = scan_topic
+        self.map_timer = self.create_timer(0.5, self.try_request_map)
         self.get_logger().info('localisation_node alive')
 
-    def map_callback(self, msg):
-        if self.grid_map is not None:
+    def try_request_map(self):
+        if self.map_loaded:
+            return
+
+        wait_timeout = min(0.5, float(self.get_parameter('map_service_timeout_sec').value))
+        if not self.map_client.wait_for_service(timeout_sec=wait_timeout):
+            self.get_logger().info('waiting for /map_server/map service...')
+            return
+
+        if self.map_request_future is None:
+            self.get_logger().info('requesting map from /map_server/map service')
+            request = GetMap.Request()
+            self.map_request_future = self.map_client.call_async(request)
+            self.map_request_future.add_done_callback(self.map_response_callback)
+
+    def map_response_callback(self, future):
+        self.map_request_future = None
+
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().error(f'GetMap request failed: {exc}')
+            return
+
+        if response is None:
+            self.get_logger().error('GetMap returned no response')
             return
 
         threshold = int(self.get_parameter('occupied_threshold').value)
-        self.grid_map = GridMap.from_msg(msg, occupied_threshold=threshold)
+        self.grid_map = GridMap.from_msg(response.map, occupied_threshold=threshold)
+        self.map_array = self.occupancy_grid_to_numpy(response.map)
+        self.free_positions, self.wall_positions = self.extract_map_positions(response.map)
+        self.knn_x, self.knn_y = self.build_knn_dataset(self.free_positions, self.wall_positions)
+        self.candidate_poses = self.generate_candidate_integer_poses()
+        self.map_loaded = True
+        self.map_timer.cancel()
+
+        neighbor_count = max(1, int(self.get_parameter('knn_neighbors').value))
+        self.knn_model = KNeighborsClassifier(n_neighbors=neighbor_count)
+        self.knn_model.fit(self.knn_x, self.knn_y)
+
         summary = self.grid_map.summary()
 
         self.get_logger().info(
@@ -68,6 +139,15 @@ class LocalisationNode(Node):
         self.get_logger().info(
             'map cells: '
             f"free={summary['free_cells']} occupied={summary['occupied_cells']} unknown={summary['unknown_cells']}"
+        )
+        self.get_logger().info(
+            'knn dataset prepared: '
+            f'free_positions={len(self.free_positions)} wall_positions={len(self.wall_positions)} '
+            f'samples={len(self.knn_x)} neighbors={neighbor_count}'
+        )
+        self.get_logger().info(
+            'candidate poses prepared: '
+            f'count={len(self.candidate_poses)} integer_yaw_assumption=0.0'
         )
 
         sample_world = (0.0, 0.0)
@@ -85,141 +165,148 @@ class LocalisationNode(Node):
             f'unknown={self.grid_map.is_unknown(*sample_grid)}'
         )
 
+        if self.scan_subscription is None:
+            self.scan_subscription = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
+            self.get_logger().info('scan subscription created; waiting for first scan')
+
     def scan_callback(self, msg):
+        if self.grid_map is None or self.knn_model is None or self.received_scan_once:
+            return
+
         points = self.scan_to_cartesian(msg)
-        self.latest_points = points
-        self.scan_counter += 1
         valid_ranges = len(points)
+        self.received_scan_once = True
 
-        if not self.received_scan_once:
-            self.received_scan_once = True
-            self.get_logger().info(
-                'scan received: '
-                f'frame={msg.header.frame_id} total_ranges={len(msg.ranges)} valid_points={valid_ranges} '
-                f'range_min={msg.range_min:.3f} range_max={msg.range_max:.3f}'
-            )
+        self.get_logger().info(
+            'scan received: '
+            f'frame={msg.header.frame_id} total_ranges={len(msg.ranges)} valid_points={valid_ranges} '
+            f'range_min={msg.range_min:.3f} range_max={msg.range_max:.3f}'
+        )
 
-            if points:
-                first_point = points[0]
-                self.get_logger().info(
-                    'scan cartesian check: '
-                    f'first_point=({first_point[0]:.3f}, {first_point[1]:.3f}) '
-                    f'sample_count={len(points)}'
-                )
+        if points.size == 0:
+            self.received_scan_once = False
+            self.get_logger().warning('first scan produced no valid cartesian points')
+            return
 
-        if self.grid_map is not None and not self.initial_pose_done and points:
-            best_pose, best_score = self.estimate_initial_pose(points)
-            if best_pose is not None:
-                self.initial_pose_done = True
-                self.estimated_pose = best_pose
-                self.publish_estimated_pose(msg, best_pose)
-                self.get_logger().info(
-                    'initial localisation result: '
-                    f'x={best_pose[0]:.3f} y={best_pose[1]:.3f} yaw={best_pose[2]:.3f} score={best_score:.4f}'
-                )
-        elif self.grid_map is not None and self.initial_pose_done and self.estimated_pose is not None and points:
-            tracked_pose, tracked_score = self.refine_pose(self.estimated_pose, points)
-            self.estimated_pose = tracked_pose
-            self.publish_estimated_pose(msg, tracked_pose)
+        first_point = points[0]
+        self.get_logger().info(
+            'scan cartesian check: '
+            f'first_point=({first_point[0]:.3f}, {first_point[1]:.3f}) sample_count={len(points)}'
+        )
 
-            log_period = max(1, int(self.get_parameter('tracking_log_period_scans').value))
-            if self.scan_counter % log_period == 0:
-                self.get_logger().info(
-                    'tracking localisation update: '
-                    f'x={tracked_pose[0]:.3f} y={tracked_pose[1]:.3f} yaw={tracked_pose[2]:.3f} score={tracked_score:.4f}'
-                )
+        best_pose, best_score = self.estimate_initial_pose(points)
+        if best_pose is None:
+            self.get_logger().warning('failed to estimate initial pose from first scan')
+            return
+
+        self.publish_estimated_pose(msg, best_pose)
+        self.get_logger().info(
+            'initial localisation result: '
+            f'x={best_pose[0]:.3f} y={best_pose[1]:.3f} yaw=0.000 score={best_score:.4f}'
+        )
+
+        if self.scan_subscription is not None:
+            self.destroy_subscription(self.scan_subscription)
+            self.scan_subscription = None
+            self.get_logger().info('first scan processed; scan subscription removed')
+
+    def occupancy_grid_to_numpy(self, map_msg: OccupancyGrid):
+        return np.array(map_msg.data, dtype=np.int16).reshape((map_msg.info.height, map_msg.info.width))
+
+    def extract_map_positions(self, map_msg: OccupancyGrid):
+        free_positions = []
+        wall_positions = []
+
+        for gy in range(map_msg.info.height):
+            for gx in range(map_msg.info.width):
+                value = self.map_array[gy, gx]
+                world_x, world_y = self.grid_map.grid_to_world(gx, gy)
+                if 0 <= value < self.grid_map.occupied_threshold:
+                    free_positions.append((world_x, world_y))
+                elif value >= self.grid_map.occupied_threshold:
+                    wall_positions.append((world_x, world_y))
+
+        return (
+            np.array(free_positions, dtype=np.float32),
+            np.array(wall_positions, dtype=np.float32),
+        )
+
+    def build_knn_dataset(self, free_positions, wall_positions):
+        x = np.vstack([free_positions, wall_positions]).astype(np.float32)
+        y = np.concatenate([
+            np.zeros(len(free_positions), dtype=np.int8),
+            np.ones(len(wall_positions), dtype=np.int8),
+        ])
+        return x, y
 
     def scan_to_cartesian(self, msg):
         downsample = max(1, int(self.get_parameter('scan_downsample_step').value))
-        points = []
-        angle = msg.angle_min
+        ranges = np.asarray(msg.ranges, dtype=np.float32)
+        indices = np.arange(0, len(ranges), downsample, dtype=np.int32)
+        sampled_ranges = ranges[indices]
+        sampled_angles = msg.angle_min + indices.astype(np.float32) * msg.angle_increment
 
-        for index, distance in enumerate(msg.ranges):
-            if index % downsample == 0 and math.isfinite(distance):
-                if msg.range_min <= distance <= msg.range_max:
-                    x = distance * math.cos(angle)
-                    y = distance * math.sin(angle)
-                    points.append((x, y))
-            angle += msg.angle_increment
+        valid_mask = (
+            np.isfinite(sampled_ranges)
+            & (sampled_ranges >= msg.range_min)
+            & (sampled_ranges <= msg.range_max)
+        )
+        if not np.any(valid_mask):
+            return np.empty((0, 2), dtype=np.float32)
 
-        return points
+        valid_ranges = sampled_ranges[valid_mask]
+        valid_angles = sampled_angles[valid_mask]
+
+        # Shift scan hits outward by half a cell so they line up better with wall cells.
+        adjusted_ranges = valid_ranges + (0.5 * self.grid_map.resolution)
+        x_coords = adjusted_ranges * np.cos(valid_angles)
+        y_coords = adjusted_ranges * np.sin(valid_angles)
+        return np.column_stack((x_coords, y_coords)).astype(np.float32)
 
     def estimate_initial_pose(self, scan_points):
-        spawn_min = int(self.get_parameter('spawn_min').value)
-        spawn_max = int(self.get_parameter('spawn_max').value)
-        theta_samples = max(8, int(self.get_parameter('theta_samples').value))
-
         best_pose = None
-        best_score = float('inf')
+        best_score = float('-inf')
+        self.pose_scores = {}
 
-        for x in range(spawn_min, spawn_max + 1):
-            for y in range(spawn_min, spawn_max + 1):
-                for index in range(theta_samples):
-                    theta = -math.pi + (2.0 * math.pi * index / theta_samples)
-                    pose = (float(x), float(y), theta)
-                    score = self.score_pose(pose, scan_points)
-                    if score < best_score:
-                        best_score = score
-                        best_pose = pose
-
-        if best_pose is None:
-            return None, float('inf')
-
-        refined_pose, refined_score = self.refine_pose(best_pose, scan_points)
-        return refined_pose, refined_score
-
-    def refine_pose(self, seed_pose, scan_points):
-        xy_step = float(self.get_parameter('refine_xy_step').value)
-        xy_radius = float(self.get_parameter('refine_xy_radius').value)
-        theta_step = float(self.get_parameter('refine_theta_step').value)
-        theta_radius = float(self.get_parameter('refine_theta_radius').value)
-
-        best_pose = seed_pose
-        best_score = self.score_pose(seed_pose, scan_points)
-
-        x_values = self.arange_inclusive(seed_pose[0] - xy_radius, seed_pose[0] + xy_radius, xy_step)
-        y_values = self.arange_inclusive(seed_pose[1] - xy_radius, seed_pose[1] + xy_radius, xy_step)
-        theta_values = self.arange_inclusive(seed_pose[2] - theta_radius, seed_pose[2] + theta_radius, theta_step)
-
-        for x in x_values:
-            for y in y_values:
-                for theta in theta_values:
-                    pose = (float(x), float(y), self.normalize_angle(float(theta)))
-                    score = self.score_pose(pose, scan_points)
-                    if score < best_score:
-                        best_score = score
-                        best_pose = pose
+        for pose in self.candidate_poses:
+            score = self.score_pose(pose, scan_points)
+            self.pose_scores[(pose[0], pose[1])] = score
+            if score > best_score:
+                best_score = score
+                best_pose = pose
 
         return best_pose, best_score
 
     def score_pose(self, pose, scan_points):
-        x, y, theta = pose
-        cos_theta = math.cos(theta)
-        sin_theta = math.sin(theta)
+        x, y, yaw = pose
+        if abs(yaw) > 1e-9:
+            return float('-inf')
 
-        if not self.grid_map.is_free(*self.grid_map.world_to_grid(x, y)):
-            return float('inf')
+        gx, gy = self.grid_map.world_to_grid(x, y)
+        if not self.grid_map.is_free(gx, gy):
+            return float('-inf')
 
-        total_distance = 0.0
-        used_points = 0
-        outside_penalty = 0.0
+        translated_scan = scan_points + np.array([x, y], dtype=np.float32)
+        predictions = self.knn_model.predict(translated_scan)
+        wall_matches = int(np.count_nonzero(predictions == 1))
+        return wall_matches / float(len(predictions))
 
-        for px, py in scan_points:
-            wx = x + cos_theta * px - sin_theta * py
-            wy = y + sin_theta * px + cos_theta * py
-            gx, gy = self.grid_map.world_to_grid(wx, wy)
+    def generate_candidate_integer_poses(self):
+        max_x = self.grid_map.origin_x + self.grid_map.width * self.grid_map.resolution - 1e-9
+        max_y = self.grid_map.origin_y + self.grid_map.height * self.grid_map.resolution - 1e-9
 
-            if not self.grid_map.in_bounds(gx, gy):
-                outside_penalty += 1.0
-                continue
+        min_ix = int(math.ceil(self.grid_map.origin_x))
+        max_ix = int(math.floor(max_x))
+        min_iy = int(math.ceil(self.grid_map.origin_y))
+        max_iy = int(math.floor(max_y))
 
-            total_distance += self.grid_map.nearest_obstacle_distance(wx, wy)
-            used_points += 1
-
-        if used_points == 0:
-            return float('inf')
-
-        return (total_distance / used_points) + 0.2 * outside_penalty
+        poses = []
+        for x in range(min_ix, max_ix + 1):
+            for y in range(min_iy, max_iy + 1):
+                gx, gy = self.grid_map.world_to_grid(float(x), float(y))
+                if self.grid_map.is_free(gx, gy):
+                    poses.append((float(x), float(y), 0.0))
+        return poses
 
     def publish_estimated_pose(self, scan_msg, pose):
         x, y, yaw = pose
@@ -242,19 +329,7 @@ class LocalisationNode(Node):
         cov_msg.pose.covariance[7] = 0.05
         cov_msg.pose.covariance[35] = 0.1
         self.pose_cov_pub.publish(cov_msg)
-
-    @staticmethod
-    def normalize_angle(angle):
-        return math.atan2(math.sin(angle), math.cos(angle))
-
-    @staticmethod
-    def arange_inclusive(start, stop, step):
-        values = []
-        current = start
-        while current <= stop + 1e-9:
-            values.append(current)
-            current += step
-        return values
+        self.initial_pose_pub.publish(cov_msg)
 
 
 def main(args=None):
