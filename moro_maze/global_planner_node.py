@@ -203,7 +203,14 @@ class GlobalPlannerNode(Node):
                         )
                         path_cells[-1] = final_exit_goal
                         replaced = True
-                if not replaced and line_is_free(self.grid_map, path_cells[-1], final_exit_goal):
+                # Only extend toward the interior exit goal when the path already
+                # has a preceding leg. A single-node path means the start anchor IS
+                # the exit (robot spawned on the exit, e.g. (0,0)/(3,3)); appending
+                # the interior goal here would send the robot backward into the maze
+                # and then out again (a degenerate back-and-forth). Leave it as
+                # [start] so the local planner sees it is already at the goal.
+                if (not replaced and len(path_cells) >= 2
+                        and line_is_free(self.grid_map, path_cells[-1], final_exit_goal)):
                     path_cells.append(final_exit_goal)
 
         # Drive out through the doorway. The BFS goal sits a full graph step inside the
