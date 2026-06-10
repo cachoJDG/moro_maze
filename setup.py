@@ -30,6 +30,7 @@ setup(
             'localisation_node = moro_maze.localisation_node:main',
             'global_planner_node = moro_maze.global_planner_node:main',
             'local_controller_node = moro_maze.local_controller_node:main',
+            'local_planner_node = moro_maze.local_planner_node:main',
         ],
     },
 )

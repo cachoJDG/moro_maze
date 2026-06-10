@@ -108,10 +108,14 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
-    local_controller_node_cmd = Node(
+    # MORO local planner: forward-simulation controller that drives the robot
+    # along the global path by publishing directly to /cmd_vel (replaces the
+    # Nav2 navigate_to_pose-based local_controller_node, which is kept in the
+    # package for reference / fallback).
+    local_planner_node_cmd = Node(
         package='moro_maze',
-        executable='local_controller_node',
-        name='local_controller_node',
+        executable='local_planner_node',
+        name='local_planner_node',
         prefix='python3',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
@@ -121,5 +125,5 @@ def generate_launch_description():
         gzserver_cmd, #gzclient_cmd, # comment out gzclient_cmd to omit the graphical simulation and save performance
         spawn_turtlebot_cmd, robot_state_publisher_cmd, set_env_vars_resources,
         nav2_bringup_cmd, rviz_cmd,
-        localisation_node_cmd, global_planner_node_cmd, local_controller_node_cmd,
+        localisation_node_cmd, global_planner_node_cmd, local_planner_node_cmd,
     ])
