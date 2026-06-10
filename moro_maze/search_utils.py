@@ -95,7 +95,6 @@ def build_graph(grid_map, required_cells=None, graph_step=6):
     required_cells = set(required_cells or [])
     sampled_cells = sampled_free_cells(grid_map, max(1, int(graph_step)))
     node_cells = set(sampled_cells)
-    node_cells.update(required_cells)
 
     edges = []
     seen_pairs = set()
@@ -121,13 +120,6 @@ def build_graph(grid_map, required_cells=None, graph_step=6):
             upper = col_nodes[index]
             if line_is_free(grid_map, lower, upper):
                 connect_visible_neighbors(edges, seen_pairs, lower, upper)
-
-    for required_cell in required_cells:
-        if required_cell in sampled_cells:
-            continue
-        anchor_cell = nearest_visible_node(required_cell, sampled_cells, grid_map)
-        if anchor_cell is not None:
-            connect_visible_neighbors(edges, seen_pairs, required_cell, anchor_cell)
 
     return sorted(node_cells), edges
 
@@ -213,16 +205,37 @@ def expand_path_cells(path_cells):
     expanded = [path_cells[0]]
 
     for index in range(1, len(path_cells)):
-        x0, y0 = path_cells[index - 1]
-        x1, y1 = path_cells[index]
-        dx = 0 if x1 == x0 else (1 if x1 > x0 else -1)
-        dy = 0 if y1 == y0 else (1 if y1 > y0 else -1)
+        segment_cells = line_cells(path_cells[index - 1], path_cells[index])
+        expanded.extend(segment_cells[1:])
 
-        current_x = x0
-        current_y = y0
-        while (current_x, current_y) != (x1, y1):
-            current_x += dx
-            current_y += dy
-            expanded.append((current_x, current_y))
+    return expanded
+
+
+def expand_sparse_path(grid_map, path_cells, step_cells=2):
+    # Turn the sparse graph path into something Nav2 can actually execute:
+    # keep the original sparse waypoints (so the planner stays "graph-based"),
+    # but seed intermediate waypoints every `step_cells` cells along each long
+    # edge instead of jumping straight between distant nodes. Each intermediate
+    # waypoint is validated to land on a free cell.
+    if len(path_cells) < 2:
+        return list(path_cells)
+
+    step_cells = max(1, int(step_cells))
+    expanded = [path_cells[0]]
+
+    for index in range(1, len(path_cells)):
+        start_cell = path_cells[index - 1]
+        end_cell = path_cells[index]
+        segment = line_cells(start_cell, end_cell)
+
+        # segment[0] is the previous waypoint (already added); segment[-1] is the
+        # node endpoint, which we always keep below.
+        for offset in range(step_cells, len(segment) - 1, step_cells):
+            candidate = segment[offset]
+            if grid_map.is_free(*candidate) and candidate != expanded[-1]:
+                expanded.append(candidate)
+
+        if end_cell != expanded[-1]:
+            expanded.append(end_cell)
 
     return expanded

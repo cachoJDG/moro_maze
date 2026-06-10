@@ -164,24 +164,54 @@ class GridMap:
         return neighbors
 
     def detect_border_exits(self, minimum_run=2):
+        # Real maze exits are openings in the maze's wall shell, NOT free runs along
+        # the outer padding ring. The map has a one-cell free border all the way
+        # around, so scanning that ring just returns the midpoint of every edge
+        # (e.g. (13,0),(0,13),...), which are not where the maze actually opens.
+        #
+        # Instead, locate the wall shell via the bounding box of all occupied cells,
+        # then scan each of its four sides for free runs. A free run on a wall side
+        # is a genuine opening; we return the outer-border cell aligned with it, so
+        # the planner can drive the robot out through that gap.
+        occupied = np.argwhere(self.data >= self.occupied_threshold)
+        if occupied.size == 0:
+            return []
+
+        wall_min_y, wall_min_x = (int(v) for v in occupied.min(axis=0))
+        wall_max_y, wall_max_x = (int(v) for v in occupied.max(axis=0))
+
         exits = []
 
-        def add_runs(cells):
+        def scan_side(cells, to_border):
             run = []
             for gx, gy in cells:
                 if self.is_free(gx, gy):
                     run.append((gx, gy))
                 else:
                     if len(run) >= minimum_run:
-                        exits.append(run[len(run) // 2])
+                        exits.append(to_border(run[len(run) // 2]))
                     run = []
             if len(run) >= minimum_run:
-                exits.append(run[len(run) // 2])
+                exits.append(to_border(run[len(run) // 2]))
 
-        add_runs([(gx, 0) for gx in range(self.width)])
-        add_runs([(gx, self.height - 1) for gx in range(self.width)])
-        add_runs([(0, gy) for gy in range(self.height)])
-        add_runs([(self.width - 1, gy) for gy in range(self.height)])
+        # Left / right walls (vertical sides) open out the left / right outer border.
+        scan_side(
+            [(wall_min_x, gy) for gy in range(wall_min_y, wall_max_y + 1)],
+            lambda cell: (0, cell[1]),
+        )
+        scan_side(
+            [(wall_max_x, gy) for gy in range(wall_min_y, wall_max_y + 1)],
+            lambda cell: (self.width - 1, cell[1]),
+        )
+        # Bottom / top walls (horizontal sides) open out the bottom / top outer border.
+        scan_side(
+            [(gx, wall_min_y) for gx in range(wall_min_x, wall_max_x + 1)],
+            lambda cell: (cell[0], 0),
+        )
+        scan_side(
+            [(gx, wall_max_y) for gx in range(wall_min_x, wall_max_x + 1)],
+            lambda cell: (cell[0], self.height - 1),
+        )
 
         unique = []
         seen = set()

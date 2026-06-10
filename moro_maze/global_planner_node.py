@@ -1,3 +1,5 @@
+import math
+
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path
@@ -8,7 +10,9 @@ from moro_maze.map_utils import GridMap
 from moro_maze.search_utils import (
     bfs_search,
     build_graph,
-    expand_path_cells,
+    expand_sparse_path,
+    line_is_free,
+    nearest_visible_node,
     path_name_cost,
     path_names_to_cells,
     reconstruct_path,
@@ -25,6 +29,12 @@ class GlobalPlannerNode(Node):
         self.declare_parameter('occupied_threshold', 65)
         self.declare_parameter('minimum_exit_run', 2)
         self.declare_parameter('graph_step', 6)
+        self.declare_parameter('execution_step_cells', 2)
+        # Keep the final goal a few cells inside the border. Goals right at the maze
+        # opening make Nav2's NavfnPlanner propagate its potential off the costmap edge
+        # (worldToMap failures), which stalls the robot. 4 cells lands on the integer
+        # corner node (world 3.0), matching where the cookbook's path terminates.
+        self.declare_parameter('exit_inset_cells', 4)
 
         self.grid_map = None
         self.robot_pose = None
@@ -82,51 +92,141 @@ class GlobalPlannerNode(Node):
             self.has_logged_plan = True
             return
 
-        graph_step = max(1, int(self.get_parameter('graph_step').value))
-        exit_goal_cells = [self.interior_goal_cell(exit_cell, graph_step) for exit_cell in exits]
-        exit_goal_cells = [goal_cell for goal_cell in exit_goal_cells if goal_cell is not None]
+        requested_graph_step = max(1, int(self.get_parameter('graph_step').value))
+        attempted_steps = []
+        fallback_steps = [requested_graph_step]
+        if requested_graph_step > 3:
+            fallback_steps.append(3)
+        fallback_steps.append(1)
 
-        required_cells = {start, *exit_goal_cells}
-        graph_nodes, graph_edges = build_graph(
-            self.grid_map,
-            required_cells=required_cells,
-            graph_step=graph_step,
-        )
-        start_name = to_node_name(*start)
-        goal_cells = list(dict.fromkeys(exit_goal_cells))
-        goal_names = [to_node_name(*goal_cell) for goal_cell in goal_cells]
-
-        self.get_logger().info(
-            f'graph built: nodes={len(graph_nodes)} edges={len(graph_edges)} '
-            f'start={start_name} graph_step={graph_step}'
-        )
-        if graph_edges:
-            self.get_logger().info(f'graph sample edges: {graph_edges[:10]}')
-
+        graph_step = None
+        graph_nodes = []
+        graph_edges = []
+        start_name = None
         best_goal_name = None
         best_path_names = []
         best_discovered = []
+        final_exit_goal_cells = []
 
-        for goal_name in goal_names:
-            discovered = bfs_search(start_name, graph_edges, goal_name)
-            path_names = reconstruct_path(discovered, start_name, goal_name)
-            if path_names and (
-                not best_path_names or path_name_cost(path_names) < path_name_cost(best_path_names)
-            ):
-                best_goal_name = goal_name
-                best_path_names = path_names
-                best_discovered = discovered
+        for candidate_step in dict.fromkeys(fallback_steps):
+            attempted_steps.append(candidate_step)
+            self.get_logger().info(f'graph attempt: graph_step={candidate_step}')
+            exit_goal_cells = [self.interior_goal_cell(exit_cell, candidate_step) for exit_cell in exits]
+            exit_goal_cells = [goal_cell for goal_cell in exit_goal_cells if goal_cell is not None]
+
+            graph_nodes, graph_edges = build_graph(
+                self.grid_map,
+                required_cells=None,
+                graph_step=candidate_step,
+            )
+            start_anchor = nearest_visible_node(start, graph_nodes, self.grid_map)
+            goal_cells = []
+            for exit_goal_cell in exit_goal_cells:
+                anchor = nearest_visible_node(exit_goal_cell, graph_nodes, self.grid_map)
+                if anchor is not None:
+                    goal_cells.append(anchor)
+
+            self.get_logger().info(
+                f'graph anchors: graph_step={candidate_step} start_cell={start} start_anchor={start_anchor} '
+                f'exit_goals={exit_goal_cells} anchored_goals={goal_cells}'
+            )
+
+            goal_cells = list(dict.fromkeys(goal_cells))
+            if start_anchor is None or not goal_cells:
+                self.get_logger().warning(
+                    f'graph anchoring failed: graph_step={candidate_step} '
+                    f'start_anchor={start_anchor} goal_cells={goal_cells}'
+                )
+                continue
+
+            start_name = to_node_name(*start_anchor)
+            goal_names = [to_node_name(*goal_cell) for goal_cell in goal_cells]
+
+            self.get_logger().info(
+                f'graph built: nodes={len(graph_nodes)} edges={len(graph_edges)} '
+                f'start={start_name} graph_step={candidate_step}'
+            )
+            if graph_edges:
+                self.get_logger().info(f'graph sample edges: {graph_edges[:10]}')
+
+            found_for_step = False
+            for goal_name in goal_names:
+                discovered = bfs_search(start_name, graph_edges, goal_name)
+                path_names = reconstruct_path(discovered, start_name, goal_name)
+                if path_names and (
+                    not best_path_names or path_name_cost(path_names) < path_name_cost(best_path_names)
+                ):
+                    graph_step = candidate_step
+                    best_goal_name = goal_name
+                    best_path_names = path_names
+                    best_discovered = discovered
+                    final_exit_goal_cells = exit_goal_cells
+                    found_for_step = True
+
+            if found_for_step:
+                self.get_logger().info(f'graph attempt succeeded: graph_step={candidate_step}')
+                break
+            self.get_logger().warning(f'graph attempt found no path: graph_step={candidate_step}')
 
         if not best_path_names:
             self.get_logger().warning(
-                f'graph search failed: start={start_name} exits={goal_names} edges={len(graph_edges)}'
+                f'graph search failed after steps={attempted_steps} start={start} exits={exits}'
             )
             self.has_logged_plan = True
             return
 
         self.has_logged_plan = True
         path_cells = path_names_to_cells(best_path_names)
-        expanded_path_cells = expand_path_cells(path_cells)
+        if start != path_cells[0] and line_is_free(self.grid_map, start, path_cells[0]):
+            path_cells.insert(0, start)
+        if final_exit_goal_cells:
+            final_exit_goal = min(
+                final_exit_goal_cells,
+                key=lambda cell: abs(cell[0] - path_cells[-1][0]) + abs(cell[1] - path_cells[-1][1]),
+            )
+            if final_exit_goal != path_cells[-1]:
+                replaced = False
+                if len(path_cells) >= 2:
+                    prev_cell = path_cells[-2]
+                    last_cell = path_cells[-1]
+                    # If the exit goal sits closer to the previous waypoint than the last
+                    # graph node does, the node overshoots the real exit. Heading to the
+                    # node and then back to the exit forces a sharp doubling-back turn
+                    # (often into a wall corner). Drop the overshooting node and aim
+                    # straight at the exit instead, when there is line of sight.
+                    goal_dist = math.hypot(final_exit_goal[0] - prev_cell[0], final_exit_goal[1] - prev_cell[1])
+                    node_dist = math.hypot(last_cell[0] - prev_cell[0], last_cell[1] - prev_cell[1])
+                    if goal_dist < node_dist and line_is_free(self.grid_map, prev_cell, final_exit_goal):
+                        self.get_logger().info(
+                            f'dropping overshoot node {last_cell} -> exit {final_exit_goal} '
+                            f'(goal_dist={goal_dist:.2f} < node_dist={node_dist:.2f})'
+                        )
+                        path_cells[-1] = final_exit_goal
+                        replaced = True
+                if not replaced and line_is_free(self.grid_map, path_cells[-1], final_exit_goal):
+                    path_cells.append(final_exit_goal)
+
+        # Drive out through the doorway. The BFS goal sits a full graph step inside the
+        # maze (so it connects cleanly to the graph), which leaves the robot stopping
+        # ~1 m short of the border. Extend the path toward the actual border exit, a
+        # couple of cells inside the edge, so the robot visibly escapes. Only do this
+        # when there is clear line of sight; otherwise keep the safe interior goal.
+        if exits:
+            exit_inset = max(1, int(self.get_parameter('exit_inset_cells').value))
+            nearest_exit = min(
+                exits,
+                key=lambda cell: abs(cell[0] - path_cells[-1][0]) + abs(cell[1] - path_cells[-1][1]),
+            )
+            escape_cell = self.interior_goal_cell(nearest_exit, exit_inset)
+            if (
+                escape_cell is not None
+                and escape_cell != path_cells[-1]
+                and line_is_free(self.grid_map, path_cells[-1], escape_cell)
+            ):
+                self.get_logger().info(
+                    f'extending to doorway: exit={nearest_exit} escape_cell={escape_cell} inset={exit_inset}'
+                )
+                path_cells.append(escape_cell)
 
         self.get_logger().info(
             f'bfs exit success: start={start_name} goal={best_goal_name} '
@@ -136,12 +236,19 @@ class GlobalPlannerNode(Node):
             f'bfs found path: {best_path_names}'
         )
         self.get_logger().info(
-            f'expanded path cells: graph_nodes={len(path_cells)} path_waypoints={len(expanded_path_cells)}'
+            f'graph path cells: waypoints={len(path_cells)} graph_step={graph_step}'
         )
         self.get_logger().info(
-            f'graph first-last cells: first={expanded_path_cells[0]} last={expanded_path_cells[-1]}'
+            f'graph first-last cells: first={path_cells[0]} last={path_cells[-1]}'
         )
-        self.publish_path(expanded_path_cells)
+
+        execution_step = max(1, int(self.get_parameter('execution_step_cells').value))
+        dense_path_cells = expand_sparse_path(self.grid_map, path_cells, step_cells=execution_step)
+        self.get_logger().info(
+            f'path densified: sparse_waypoints={len(path_cells)} '
+            f'dense_waypoints={len(dense_path_cells)} execution_step_cells={execution_step}'
+        )
+        self.publish_path(dense_path_cells)
 
     def publish_path(self, path_cells):
         msg = Path()
