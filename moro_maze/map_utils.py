@@ -4,6 +4,15 @@ import numpy as np
 
 
 class GridMap:
+    """Thin wrapper around a nav_msgs/OccupancyGrid.
+
+    Stores the occupancy data as a 2D array indexed [gy, gx] (row-major, gy=0 is
+    the bottom row, matching ROS map convention) and offers world<->grid
+    conversions plus the free/occupied/exit queries the planner needs. Occupancy
+    values follow ROS: 0..100 cost, -1 unknown; a cell counts as occupied at or
+    above `occupied_threshold`.
+    """
+
     def __init__(self, data, width, height, resolution, origin_x, origin_y, occupied_threshold=65):
         self.width = int(width)
         self.height = int(height)
@@ -28,11 +37,15 @@ class GridMap:
         )
 
     def world_to_grid(self, x, y):
+        # World (metres) -> grid index: subtract the map origin and divide by the
+        # cell size, flooring to the cell that contains the point.
         gx = int(math.floor((x - self.origin_x) / self.resolution))
         gy = int(math.floor((y - self.origin_y) / self.resolution))
         return gx, gy
 
     def grid_to_world(self, gx, gy):
+        # Grid index -> world (metres): inverse of world_to_grid, returning the
+        # cell CENTRE (the +0.5 offset), which is what the planner publishes.
         x = self.origin_x + (gx + 0.5) * self.resolution
         y = self.origin_y + (gy + 0.5) * self.resolution
         return x, y
@@ -134,6 +147,9 @@ class GridMap:
         return float(np.min(distances))
 
     def nearest_free_cell(self, gx, gy, max_radius=4):
+        # Snap a (possibly occupied/out-of-bounds) cell to the closest free cell by
+        # searching outward in growing square rings, up to max_radius. Used to keep
+        # the robot start and the exit goals on valid free cells.
         if self.in_bounds(gx, gy) and self.is_free(gx, gy):
             return gx, gy
 

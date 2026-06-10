@@ -1,3 +1,14 @@
+"""Graph-search utilities for the SOAR global planner.
+
+Builds a visibility graph over sampled free cells of the map, runs Breadth-First
+Search between two nodes, reconstructs the path, and provides the Bresenham
+line-of-sight helpers used both for graph edges and for densifying the path.
+
+A node is identified by its grid coordinates encoded as the string 'gx.gy' (the
+dot is the SOAR cookbook's convention, e.g. '4.4', '10.4'); edges are dicts with
+'parent', 'child' and 'cost'.
+"""
+
 from collections import deque
 import math
 
@@ -6,10 +17,12 @@ CARDINAL_MOVES = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
 
 def to_node_name(gx, gy):
+    """Encode a grid cell as the node name 'gx.gy' (cookbook convention)."""
     return f'{int(gx)}.{int(gy)}'
 
 
 def from_node_name(name):
+    """Decode a node name 'gx.gy' back into the (gx, gy) integer grid cell."""
     x_str, y_str = str(name).split('.')
     return int(x_str), int(y_str)
 
@@ -21,6 +34,9 @@ def edge_cost(parent_name, child_name):
 
 
 def line_cells(start_cell, end_cell):
+    # Bresenham's line algorithm: returns every grid cell the straight segment
+    # start->end passes through, using only integer arithmetic. Used to test
+    # line-of-sight (no wall between two cells) and to densify path segments.
     x0, y0 = start_cell
     x1, y1 = end_cell
 
@@ -46,6 +62,8 @@ def line_cells(start_cell, end_cell):
 
 
 def line_is_free(grid_map, start_cell, end_cell):
+    # Line of sight: True only if every cell on the Bresenham segment is in bounds
+    # and free (no wall blocks the straight path between the two cells).
     for gx, gy in line_cells(start_cell, end_cell):
         if not grid_map.in_bounds(gx, gy) or not grid_map.is_free(gx, gy):
             return False
@@ -53,6 +71,9 @@ def line_is_free(grid_map, start_cell, end_cell):
 
 
 def nearest_visible_node(target_cell, node_cells, grid_map):
+    # Anchor an arbitrary cell (robot start or exit) to the graph: pick the closest
+    # graph node that has clear line of sight to it, so the robot can reach the
+    # graph (and the goal off the graph) in a straight collision-free segment.
     visible = [cell for cell in node_cells if line_is_free(grid_map, target_cell, cell)]
     if not visible:
         return None
@@ -60,6 +81,10 @@ def nearest_visible_node(target_cell, node_cells, grid_map):
 
 
 def sampling_anchor_cell(origin, resolution):
+    # Grid cell whose centre sits at world coordinate 0. Used so the sampling
+    # lattice is phase-aligned to integer world coords: with this anchor and
+    # graph_step=6 the nodes land exactly on world 0,1,2,3 (grid 4,10,16,22),
+    # matching the cookbook's node positions.
     return int(round((-origin / resolution) - 0.5))
 
 
@@ -67,6 +92,8 @@ def sampled_free_cells(grid_map, graph_step):
     anchor_x = sampling_anchor_cell(grid_map.origin_x, grid_map.resolution)
     anchor_y = sampling_anchor_cell(grid_map.origin_y, grid_map.resolution)
 
+    # Keep every free cell that lies on the lattice: its offset from the anchor is
+    # a multiple of graph_step in both axes.
     sampled = set()
     for gy in range(grid_map.height):
         for gx in range(grid_map.width):
@@ -92,6 +119,10 @@ def connect_visible_neighbors(edges, seen_pairs, node_a, node_b):
 
 
 def build_graph(grid_map, required_cells=None, graph_step=6):
+    # Visibility graph: nodes are free cells sampled on a regular lattice (every
+    # graph_step cells, anchored so they fall on integer world coords). Edges
+    # connect consecutive nodes in the same row or column when there is clear line
+    # of sight between them (no wall in between). Edge cost = Euclidean distance.
     required_cells = set(required_cells or [])
     sampled_cells = sampled_free_cells(grid_map, max(1, int(graph_step)))
     node_cells = set(sampled_cells)
@@ -99,6 +130,8 @@ def build_graph(grid_map, required_cells=None, graph_step=6):
     edges = []
     seen_pairs = set()
 
+    # Group nodes by row (shared gy) and by column (shared gx) so we only test
+    # line of sight between immediate neighbours along each axis.
     rows = {}
     cols = {}
     for gx, gy in node_cells:
@@ -135,14 +168,18 @@ def get_children(edges, node_name):
 
 
 def bfs_search(start_name, edges, goal_name):
+    # Breadth-First Search (SOAR cookbook). Explores the graph level by level from
+    # start. Returns the list of edges discovered during the search (the search
+    # tree): each visited child stores the edge from the node that discovered it,
+    # which reconstruct_path() later follows backwards from the goal to the start.
     if start_name is None or goal_name is None:
         return []
     if start_name == goal_name:
         return []
 
     discovered_edges = []
-    visited = {start_name}
-    queue = deque([start_name])
+    visited = {start_name}          # nodes already enqueued (avoid revisiting)
+    queue = deque([start_name])     # FIFO frontier -> breadth-first order
 
     while queue:
         current = queue.popleft()
@@ -160,6 +197,9 @@ def bfs_search(start_name, edges, goal_name):
 
 
 def reconstruct_path(discovered_edges, start_name, goal_name):
+    # Walk the BFS search tree backwards: from the goal, follow each node's parent
+    # until reaching the start, then reverse to get start -> goal. The search tree
+    # guarantees exactly one parent per discovered node, so this is unambiguous.
     if start_name is None or goal_name is None:
         return []
     if start_name == goal_name:
@@ -168,7 +208,7 @@ def reconstruct_path(discovered_edges, start_name, goal_name):
         return []
 
     parent_lookup = {edge['child']: edge['parent'] for edge in discovered_edges}
-    if goal_name not in parent_lookup:
+    if goal_name not in parent_lookup:        # goal was never reached
         return []
 
     path = [goal_name]

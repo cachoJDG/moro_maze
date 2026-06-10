@@ -21,7 +21,13 @@ import numpy as np
 # --- Determine Movement Goal Relative to Robot ------------------------------
 
 def pose2tf_mat(pose):
-    """(x, y, theta) -> 2D homogeneous transform matrix."""
+    """(x, y, theta) -> 2D homogeneous transform matrix.
+
+    Layout is [ R(theta) | t ; 0 0 1 ], i.e. a 2x2 rotation in the top-left and
+    the translation (x, y) in the last column. Expressing poses as matrices lets
+    us compose/invert them with plain matrix multiplication (see
+    goal_relative_to_robot).
+    """
     x, y, theta = pose
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
@@ -33,7 +39,11 @@ def pose2tf_mat(pose):
 
 
 def tf_mat2pose(tf_mat):
-    """2D homogeneous transform matrix -> (x, y, theta)."""
+    """2D homogeneous transform matrix -> (x, y, theta).
+
+    x, y are read straight from the translation column; theta is recovered from
+    the rotation block with atan2(sin, cos) = atan2(R[1,0], R[0,0]).
+    """
     x = tf_mat[0, 2]
     y = tf_mat[1, 2]
     theta = math.atan2(tf_mat[1, 0], tf_mat[0, 0])
@@ -97,9 +107,12 @@ def forwardKinematics(control, lastPose, dt, dtype=np.float64):
         "Wrong control format. Control must be [vt, wt]"
 
     vt, wt = control
-    # Avoid division by zero when omega is zero.
+    # Avoid division by zero when omega is zero (straight-line motion).
     if wt == 0:
         wt = np.finfo(dtype).tiny
+    # Exact integration of the unicycle model for a constant (vt, wt) over dt: the
+    # robot follows a circular arc of radius R = vt/wt. The pose update below is the
+    # closed-form solution of x' = v cos(theta), y' = v sin(theta), theta' = w.
     vtwt = vt / wt
     _, _, theta = lastPose
     return lastPose + np.array([
@@ -166,11 +179,15 @@ def costFn(pose, goalpose, control, Q=None, R=None):
     pose = np.asarray(pose, dtype=np.float64)
     goalpose = np.asarray(goalpose, dtype=np.float64)
 
+    # State error e = |pose - goal|. The heading component is wrapped to [-pi, pi]
+    # first so that, e.g., an error of 350 deg counts as -10 deg (small), not large.
     error = pose - goalpose
     error[2] = _wrap_angle(error[2])
     e = np.abs(error)
     u = np.abs(np.asarray(control, dtype=np.float64))
 
+    # Quadratic form: e^T Q e penalises being far from the goal (Q weights x/y/theta),
+    # u^T R u penalises control effort (R weights linear/angular velocity).
     return float(e.T @ (Q @ e) + u.T @ (R @ u))
 
 

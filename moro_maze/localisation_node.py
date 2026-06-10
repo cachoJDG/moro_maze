@@ -232,6 +232,9 @@ class LocalisationNode(Node):
         )
 
     def build_knn_dataset(self, free_positions, wall_positions):
+        # Training set for the kNN classifier: X = world coordinates of every map
+        # cell, y = its label (0 = free, 1 = wall). With k=1 this turns the discrete
+        # map into a continuous "is this point on a wall?" classifier.
         x = np.vstack([free_positions, wall_positions]).astype(np.float32)
         y = np.concatenate([
             np.zeros(len(free_positions), dtype=np.int8),
@@ -240,6 +243,9 @@ class LocalisationNode(Node):
         return x, y
 
     def scan_to_cartesian(self, msg):
+        # Convert the LaserScan from polar (range at each beam angle) to cartesian
+        # (x, y) points in the robot frame. We take every `downsample`-th beam for
+        # speed and drop invalid readings (inf/NaN or outside [range_min, range_max]).
         downsample = max(1, int(self.get_parameter('scan_downsample_step').value))
         ranges = np.asarray(msg.ranges, dtype=np.float32)
         indices = np.arange(0, len(ranges), downsample, dtype=np.int32)
@@ -264,6 +270,8 @@ class LocalisationNode(Node):
         return np.column_stack((x_coords, y_coords)).astype(np.float32)
 
     def estimate_initial_pose(self, scan_points):
+        # Try every candidate integer pose and keep the highest-scoring one. The
+        # winner is our estimate of where the robot actually is.
         best_pose = None
         best_score = float('-inf')
         self.pose_scores = {}
@@ -278,6 +286,11 @@ class LocalisationNode(Node):
         return best_pose, best_score
 
     def score_pose(self, pose, scan_points):
+        # Score a candidate pose: if the robot really were here, the laser hits
+        # should fall on walls. We only consider yaw=0 (cookbook assumption) and
+        # free cells, then translate the scan to this pose and ask the kNN how many
+        # hits land on a wall. Score = fraction of hits classified as wall
+        # (1.0 = perfect match).
         x, y, yaw = pose
         if abs(yaw) > 1e-9:
             return float('-inf')
@@ -292,6 +305,9 @@ class LocalisationNode(Node):
         return wall_matches / float(len(predictions))
 
     def generate_candidate_integer_poses(self):
+        # Build the list of poses the robot could be at. By cookbook assumption the
+        # robot starts on integer world coordinates facing +x (yaw=0), so we only
+        # enumerate the integer (x, y) inside the map that fall on a free cell.
         max_x = self.grid_map.origin_x + self.grid_map.width * self.grid_map.resolution - 1e-9
         max_y = self.grid_map.origin_y + self.grid_map.height * self.grid_map.resolution - 1e-9
 
