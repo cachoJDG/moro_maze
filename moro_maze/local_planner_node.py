@@ -169,8 +169,15 @@ class LocalPlannerNode(Node):
         last_index = len(self.global_path) - 1
 
         while self.current_goal_index < last_index:
-            gx, gy, _ = self.global_path[self.current_goal_index]
-            if math.hypot(gx - robot_pose[0], gy - robot_pose[1]) < goal_tol:
+            cur = self.global_path[self.current_goal_index]
+            nxt = self.global_path[self.current_goal_index + 1]
+            d_cur = math.hypot(cur[0] - robot_pose[0], cur[1] - robot_pose[1])
+            d_nxt = math.hypot(nxt[0] - robot_pose[0], nxt[1] - robot_pose[1])
+            # Advance when the waypoint is reached, OR when we have already driven
+            # past it (the next waypoint is now closer). Without the overshoot
+            # check the robot can stall chasing a waypoint that ended up behind it
+            # after passing it at speed.
+            if d_cur < goal_tol or d_nxt < d_cur:
                 self.current_goal_index += 1
             else:
                 break
