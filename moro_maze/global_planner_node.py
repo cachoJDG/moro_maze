@@ -29,11 +29,13 @@ class GlobalPlannerNode(Node):
     MINIMUM_EXIT_RUN = 2         # min free cells in a wall side to count as an exit
     GRAPH_STEP = 6               # visibility-graph lattice spacing (cells)
     EXECUTION_STEP_CELLS = 2     # densify the sparse path every N cells
-    # Keep the final goal a few cells inside the border. Goals right at the maze
-    # opening make Nav2's NavfnPlanner propagate its potential off the costmap edge
-    # (worldToMap failures), which stalls the robot. 4 cells lands on the integer
-    # corner node (world 3.0), matching where the cookbook's path terminates.
-    EXIT_INSET_CELLS = 4
+    # How far inside the border the final doorway waypoint sits. The MORO local
+    # planner drives /cmd_vel directly (Nav2 is NOT used for control), so the old
+    # reason for a big inset -- keeping Nav2's NavfnPlanner from propagating off
+    # the costmap edge -- no longer applies. 1 cell puts the last waypoint just
+    # past the wall line, so the robot drives OUT through the gap instead of
+    # stopping short inside the maze.
+    EXIT_INSET_CELLS = 1
 
     def __init__(self):
         super().__init__('global_planner_node')
@@ -174,39 +176,31 @@ class GlobalPlannerNode(Node):
         path_cells = path_names_to_cells(best_path_names)
         if start != path_cells[0] and line_is_free(self.grid_map, start, path_cells[0]):
             path_cells.insert(0, start)
-        if final_exit_goal_cells:
+        # Overshoot correction only. If the last graph node overshoots the real
+        # exit (the interior exit goal is closer to the PREVIOUS waypoint than the
+        # node is), heading to the node and then back forces a doubling-back turn,
+        # so replace the overshooting node with the exit goal when there is line of
+        # sight. We deliberately do NOT *append* the interior exit goal: it sits a
+        # full graph step (~6 cells) inside the opening, so appending it after a
+        # node that is already closer to the border sends the robot backward into
+        # the maze (a visible left/west detour). The doorway extension below is
+        # what drives the robot OUT, toward the actual border gap.
+        if final_exit_goal_cells and len(path_cells) >= 2:
             final_exit_goal = min(
                 final_exit_goal_cells,
                 key=lambda cell: abs(cell[0] - path_cells[-1][0]) + abs(cell[1] - path_cells[-1][1]),
             )
-            if final_exit_goal != path_cells[-1]:
-                replaced = False
-                if len(path_cells) >= 2:
-                    prev_cell = path_cells[-2]
-                    last_cell = path_cells[-1]
-                    # If the exit goal sits closer to the previous waypoint than the last
-                    # graph node does, the node overshoots the real exit. Heading to the
-                    # node and then back to the exit forces a sharp doubling-back turn
-                    # (often into a wall corner). Drop the overshooting node and aim
-                    # straight at the exit instead, when there is line of sight.
-                    goal_dist = math.hypot(final_exit_goal[0] - prev_cell[0], final_exit_goal[1] - prev_cell[1])
-                    node_dist = math.hypot(last_cell[0] - prev_cell[0], last_cell[1] - prev_cell[1])
-                    if goal_dist < node_dist and line_is_free(self.grid_map, prev_cell, final_exit_goal):
-                        self.get_logger().info(
-                            f'dropping overshoot node {last_cell} -> exit {final_exit_goal} '
-                            f'(goal_dist={goal_dist:.2f} < node_dist={node_dist:.2f})'
-                        )
-                        path_cells[-1] = final_exit_goal
-                        replaced = True
-                # Only extend toward the interior exit goal when the path already
-                # has a preceding leg. A single-node path means the start anchor IS
-                # the exit (robot spawned on the exit, e.g. (0,0)/(3,3)); appending
-                # the interior goal here would send the robot backward into the maze
-                # and then out again (a degenerate back-and-forth). Leave it as
-                # [start] so the local planner sees it is already at the goal.
-                if (not replaced and len(path_cells) >= 2
-                        and line_is_free(self.grid_map, path_cells[-1], final_exit_goal)):
-                    path_cells.append(final_exit_goal)
+            prev_cell = path_cells[-2]
+            last_cell = path_cells[-1]
+            if final_exit_goal != last_cell:
+                goal_dist = math.hypot(final_exit_goal[0] - prev_cell[0], final_exit_goal[1] - prev_cell[1])
+                node_dist = math.hypot(last_cell[0] - prev_cell[0], last_cell[1] - prev_cell[1])
+                if goal_dist < node_dist and line_is_free(self.grid_map, prev_cell, final_exit_goal):
+                    self.get_logger().info(
+                        f'dropping overshoot node {last_cell} -> exit {final_exit_goal} '
+                        f'(goal_dist={goal_dist:.2f} < node_dist={node_dist:.2f})'
+                    )
+                    path_cells[-1] = final_exit_goal
 
         # Drive out through the doorway. The BFS goal sits a full graph step inside the
         # maze (so it connects cleanly to the graph), which leaves the robot stopping
