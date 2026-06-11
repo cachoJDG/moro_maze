@@ -40,8 +40,16 @@ class LocalPlannerNode(Node):
     CONTROL_RATE = 5.0          # [Hz] control loop
     SIM_TS = 0.2                # [s] forward-simulation sampling time
     HORIZON = 12                # forward-sim steps
-    GOAL_TOLERANCE = 0.25       # [m] advance to the next waypoint
-    FINAL_GOAL_TOLERANCE = 0.20  # [m] stop at the last waypoint
+    GOAL_TOLERANCE = 0.25        # [m] advance to the next waypoint
+    # Tighter radius for the LAST waypoint than for the intermediate ones: a
+    # large radius makes the robot declare "arrived" while still ~0.20 m short
+    # and stop inside the maze, so it never clears the exit. Keep it small so it
+    # drives right up to the final goal.
+    FINAL_GOAL_TOLERANCE = 0.10  # [m] stop radius at the last waypoint
+    # Once on the final leg, keep driving for up to this long to let the robot
+    # finish exiting, then stop anyway so the run terminates cleanly even if it
+    # cannot quite settle inside the tight radius.
+    FINAL_GOAL_GRACE_SEC = 10.0  # [s] extra time at the last waypoint
 
     # Velocity / acceleration limits for control generation.
     V_MIN = 0.0
@@ -73,6 +81,7 @@ class LocalPlannerNode(Node):
         self.current_goal_index = 0
         self.last_control = np.array([0.0, 0.0])
         self.finished = False
+        self.final_leg_start = None  # time we first reached the last waypoint
 
         self.Q = np.diag([self.Q_POS, self.Q_POS, self.Q_THETA])
         self.R = np.diag([self.R_V, self.R_W])
@@ -121,6 +130,7 @@ class LocalPlannerNode(Node):
         self.global_path = path
         self.current_goal_index = 0
         self.finished = False
+        self.final_leg_start = None
         self.last_control = np.array([0.0, 0.0])
         self.get_logger().info(
             f'local planner received global path: goals={len(self.global_path)}')
@@ -176,15 +186,32 @@ class LocalPlannerNode(Node):
 
         goal_pose = self.global_path[self.current_goal_index]
 
-        # Stop once the final goal is reached.
+        # Stop once the final goal is reached. On the final leg we (a) use the
+        # tighter FINAL_GOAL_TOLERANCE so the robot drives close enough to clear
+        # the exit, and (b) grant a grace period: keep driving for up to
+        # FINAL_GOAL_GRACE_SEC to finish exiting, then stop regardless so the run
+        # ends cleanly even if it cannot settle inside the tight radius.
         if self.current_goal_index == last_index:
+            now = self.get_clock().now()
+            if self.final_leg_start is None:
+                self.final_leg_start = now
+            elapsed = (now - self.final_leg_start).nanoseconds * 1e-9
+
             dist_final = math.hypot(goal_pose[0] - robot_pose[0],
                                     goal_pose[1] - robot_pose[1])
             if dist_final < final_tol:
                 self.stop_robot()
                 self.finished = True
                 self.get_logger().info(
-                    'local planner: final goal reached, robot stopped')
+                    f'local planner: final goal reached (dist={dist_final:.3f} m), '
+                    'robot stopped')
+                return
+            if elapsed > self.FINAL_GOAL_GRACE_SEC:
+                self.stop_robot()
+                self.finished = True
+                self.get_logger().info(
+                    f'local planner: final-goal grace ({self.FINAL_GOAL_GRACE_SEC:.0f}s) '
+                    f'elapsed at dist={dist_final:.3f} m, robot stopped')
                 return
 
         # 3. Goal relative to the robot.
