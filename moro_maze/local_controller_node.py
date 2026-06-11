@@ -10,27 +10,23 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
 class LocalControllerNode(Node):
+    # --- Tuning constants (hardcoded; kept simple, no ROS parameters) -------
+    PATH_TOPIC = '/global_path'
+    ESTIMATED_POSE_TOPIC = '/estimated_pose'
+    AMCL_POSE_TOPIC = '/amcl_pose'
+    GOAL_TOPIC = '/goal_pose'
+    NAVIGATE_ACTION = 'navigate_to_pose'
+    GOAL_TOLERANCE = 0.20        # [m] waypoint-reached threshold
+    ACTION_WAIT_TIMEOUT = 0.5    # [s] wait for the action server
+    RETRY_TIMER_PERIOD = 1.0     # [s] resend goal if server unavailable
+
     def __init__(self):
         super().__init__('local_controller_node')
-        self.declare_parameter('path_topic', '/global_path')
-        self.declare_parameter('estimated_pose_topic', '/estimated_pose')
-        self.declare_parameter('amcl_pose_topic', '/amcl_pose')
-        self.declare_parameter('goal_topic', '/goal_pose')
-        self.declare_parameter('goal_tolerance', 0.20)
-        self.declare_parameter('navigate_action', 'navigate_to_pose')
-        self.declare_parameter('action_wait_timeout', 0.5)
-        self.declare_parameter('retry_timer_period', 1.0)
 
         self.path_points = []
         self.current_goal_index = None
         self.current_pose = None
         self.goal_in_progress = False
-
-        path_topic = self.get_parameter('path_topic').value
-        estimated_pose_topic = self.get_parameter('estimated_pose_topic').value
-        amcl_pose_topic = self.get_parameter('amcl_pose_topic').value
-        goal_topic = self.get_parameter('goal_topic').value
-        action_name = self.get_parameter('navigate_action').value
 
         path_qos = QoSProfile(depth=1)
         path_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -40,14 +36,13 @@ class LocalControllerNode(Node):
         goal_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         goal_qos.reliability = ReliabilityPolicy.RELIABLE
 
-        self.goal_pub = self.create_publisher(PoseStamped, goal_topic, goal_qos)
-        self.create_subscription(Path, path_topic, self.path_callback, path_qos)
-        self.create_subscription(PoseStamped, estimated_pose_topic, self.estimated_pose_callback, 10)
-        self.create_subscription(PoseWithCovarianceStamped, amcl_pose_topic, self.amcl_pose_callback, 10)
+        self.goal_pub = self.create_publisher(PoseStamped, self.GOAL_TOPIC, goal_qos)
+        self.create_subscription(Path, self.PATH_TOPIC, self.path_callback, path_qos)
+        self.create_subscription(PoseStamped, self.ESTIMATED_POSE_TOPIC, self.estimated_pose_callback, 10)
+        self.create_subscription(PoseWithCovarianceStamped, self.AMCL_POSE_TOPIC, self.amcl_pose_callback, 10)
 
-        self.navigate_client = ActionClient(self, NavigateToPose, action_name)
-        retry_period = float(self.get_parameter('retry_timer_period').value)
-        self.retry_timer = self.create_timer(retry_period, self.retry_current_goal)
+        self.navigate_client = ActionClient(self, NavigateToPose, self.NAVIGATE_ACTION)
+        self.retry_timer = self.create_timer(self.RETRY_TIMER_PERIOD, self.retry_current_goal)
         self.get_logger().info('local_controller_node alive')
 
     def estimated_pose_callback(self, msg):
@@ -80,7 +75,7 @@ class LocalControllerNode(Node):
         if self.current_pose is None:
             return 0
 
-        tolerance = float(self.get_parameter('goal_tolerance').value)
+        tolerance = self.GOAL_TOLERANCE
         for index, point in enumerate(self.path_points):
             if self.distance(self.current_pose, point) > tolerance:
                 return index
@@ -90,8 +85,7 @@ class LocalControllerNode(Node):
         if self.current_goal_index is None or not self.path_points or self.goal_in_progress:
             return
 
-        wait_timeout = float(self.get_parameter('action_wait_timeout').value)
-        if not self.navigate_client.wait_for_server(timeout_sec=wait_timeout):
+        if not self.navigate_client.wait_for_server(timeout_sec=self.ACTION_WAIT_TIMEOUT):
             self.get_logger().info(f'navigate_to_pose not ready yet; postponing waypoint send ({reason})')
             return
 

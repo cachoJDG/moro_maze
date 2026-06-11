@@ -21,28 +21,26 @@ from moro_maze.search_utils import (
 
 
 class GlobalPlannerNode(Node):
+    # --- Tuning constants (hardcoded; kept simple, no ROS parameters) -------
+    MAP_TOPIC = '/map'
+    POSE_TOPIC = '/estimated_pose'
+    PATH_TOPIC = '/global_path'
+    OCCUPIED_THRESHOLD = 65      # occupancy value at/above which a cell is a wall
+    MINIMUM_EXIT_RUN = 2         # min free cells in a wall side to count as an exit
+    GRAPH_STEP = 6               # visibility-graph lattice spacing (cells)
+    EXECUTION_STEP_CELLS = 2     # densify the sparse path every N cells
+    # Keep the final goal a few cells inside the border. Goals right at the maze
+    # opening make Nav2's NavfnPlanner propagate its potential off the costmap edge
+    # (worldToMap failures), which stalls the robot. 4 cells lands on the integer
+    # corner node (world 3.0), matching where the cookbook's path terminates.
+    EXIT_INSET_CELLS = 4
+
     def __init__(self):
         super().__init__('global_planner_node')
-        self.declare_parameter('map_topic', '/map')
-        self.declare_parameter('pose_topic', '/estimated_pose')
-        self.declare_parameter('path_topic', '/global_path')
-        self.declare_parameter('occupied_threshold', 65)
-        self.declare_parameter('minimum_exit_run', 2)
-        self.declare_parameter('graph_step', 6)
-        self.declare_parameter('execution_step_cells', 2)
-        # Keep the final goal a few cells inside the border. Goals right at the maze
-        # opening make Nav2's NavfnPlanner propagate its potential off the costmap edge
-        # (worldToMap failures), which stalls the robot. 4 cells lands on the integer
-        # corner node (world 3.0), matching where the cookbook's path terminates.
-        self.declare_parameter('exit_inset_cells', 4)
 
         self.grid_map = None
         self.robot_pose = None
         self.has_logged_plan = False
-
-        map_topic = self.get_parameter('map_topic').value
-        pose_topic = self.get_parameter('pose_topic').value
-        path_topic = self.get_parameter('path_topic').value
 
         map_qos = QoSProfile(depth=1)
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -52,18 +50,17 @@ class GlobalPlannerNode(Node):
         path_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         path_qos.reliability = ReliabilityPolicy.RELIABLE
 
-        self.path_pub = self.create_publisher(Path, path_topic, path_qos)
+        self.path_pub = self.create_publisher(Path, self.PATH_TOPIC, path_qos)
 
-        self.create_subscription(OccupancyGrid, map_topic, self.map_callback, map_qos)
-        self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
+        self.create_subscription(OccupancyGrid, self.MAP_TOPIC, self.map_callback, map_qos)
+        self.create_subscription(PoseStamped, self.POSE_TOPIC, self.pose_callback, 10)
         self.get_logger().info('global_planner_node alive')
 
     def map_callback(self, msg):
         # Receive the static maze map once and convert it into a helper grid structure
         # that the planner can query in grid coordinates.
         if self.grid_map is None:
-            threshold = int(self.get_parameter('occupied_threshold').value)
-            self.grid_map = GridMap.from_msg(msg, occupied_threshold=threshold)
+            self.grid_map = GridMap.from_msg(msg, occupied_threshold=self.OCCUPIED_THRESHOLD)
             self.get_logger().info(
                 f'planner map received: width={self.grid_map.width} height={self.grid_map.height} '
                 f'resolution={self.grid_map.resolution:.6f}'
@@ -82,9 +79,7 @@ class GlobalPlannerNode(Node):
 
         start = self.grid_map.world_to_grid(self.robot_pose[0], self.robot_pose[1])
         start = self.grid_map.nearest_free_cell(*start)
-        exits = self.grid_map.detect_border_exits(
-            minimum_run=int(self.get_parameter('minimum_exit_run').value)
-        )
+        exits = self.grid_map.detect_border_exits(minimum_run=self.MINIMUM_EXIT_RUN)
         self.get_logger().info(f'detected exits: {exits}')
 
         if start is None or not exits:
@@ -92,7 +87,7 @@ class GlobalPlannerNode(Node):
             self.has_logged_plan = True
             return
 
-        requested_graph_step = max(1, int(self.get_parameter('graph_step').value))
+        requested_graph_step = max(1, self.GRAPH_STEP)
         attempted_steps = []
         fallback_steps = [requested_graph_step]
         if requested_graph_step > 3:
@@ -219,7 +214,7 @@ class GlobalPlannerNode(Node):
         # couple of cells inside the edge, so the robot visibly escapes. Only do this
         # when there is clear line of sight; otherwise keep the safe interior goal.
         if exits:
-            exit_inset = max(1, int(self.get_parameter('exit_inset_cells').value))
+            exit_inset = max(1, self.EXIT_INSET_CELLS)
             nearest_exit = min(
                 exits,
                 key=lambda cell: abs(cell[0] - path_cells[-1][0]) + abs(cell[1] - path_cells[-1][1]),
@@ -249,7 +244,7 @@ class GlobalPlannerNode(Node):
             f'graph first-last cells: first={path_cells[0]} last={path_cells[-1]}'
         )
 
-        execution_step = max(1, int(self.get_parameter('execution_step_cells').value))
+        execution_step = max(1, self.EXECUTION_STEP_CELLS)
         dense_path_cells = expand_sparse_path(self.grid_map, path_cells, step_cells=execution_step)
         self.get_logger().info(
             f'path densified: sparse_waypoints={len(path_cells)} '

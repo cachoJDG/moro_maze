@@ -41,18 +41,19 @@ from moro_maze.map_utils import GridMap
 
 
 class LocalisationNode(Node):
+    # --- Tuning constants (hardcoded; kept simple, no ROS parameters) -------
+    SCAN_TOPIC = '/scan'
+    POSE_TOPIC = '/estimated_pose'
+    POSE_COV_TOPIC = '/estimated_pose_cov'
+    INITIAL_POSE_TOPIC = '/initialpose'
+    MAP_SERVICE = '/map_server/map'
+    OCCUPIED_THRESHOLD = 65       # occupancy value at/above which a cell is a wall
+    SCAN_DOWNSAMPLE_STEP = 8      # use every Nth laser beam
+    KNN_NEIGHBORS = 1             # k for the free/wall classifier
+    MAP_SERVICE_TIMEOUT_SEC = 5.0  # [s] wait for the map service
+
     def __init__(self):
         super().__init__('localisation_node')
-        self.declare_parameter('map_topic', '/map')
-        self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('pose_topic', '/estimated_pose')
-        self.declare_parameter('pose_cov_topic', '/estimated_pose_cov')
-        self.declare_parameter('initial_pose_topic', '/initialpose')
-        self.declare_parameter('occupied_threshold', 65)
-        self.declare_parameter('scan_downsample_step', 8)
-        self.declare_parameter('knn_neighbors', 1)
-        self.declare_parameter('map_service', '/map_server/map')
-        self.declare_parameter('map_service_timeout_sec', 5.0)
 
         self.grid_map = None
         self.knn_model = None
@@ -68,22 +69,16 @@ class LocalisationNode(Node):
         self.candidate_poses = []
         self.pose_scores = {}
 
-        scan_topic = self.get_parameter('scan_topic').value
-        pose_topic = self.get_parameter('pose_topic').value
-        pose_cov_topic = self.get_parameter('pose_cov_topic').value
-        initial_pose_topic = self.get_parameter('initial_pose_topic').value
-        map_service = self.get_parameter('map_service').value
-
         latched_qos = QoSProfile(depth=1)
         latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         latched_qos.reliability = ReliabilityPolicy.RELIABLE
 
-        self.pose_pub = self.create_publisher(PoseStamped, pose_topic, latched_qos)
-        self.pose_cov_pub = self.create_publisher(PoseWithCovarianceStamped, pose_cov_topic, latched_qos)
-        self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, initial_pose_topic, 10)
+        self.pose_pub = self.create_publisher(PoseStamped, self.POSE_TOPIC, latched_qos)
+        self.pose_cov_pub = self.create_publisher(PoseWithCovarianceStamped, self.POSE_COV_TOPIC, latched_qos)
+        self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped, self.INITIAL_POSE_TOPIC, 10)
 
-        self.map_client = self.create_client(GetMap, map_service)
-        self.scan_topic = scan_topic
+        self.map_client = self.create_client(GetMap, self.MAP_SERVICE)
+        self.scan_topic = self.SCAN_TOPIC
         self.map_timer = self.create_timer(0.5, self.try_request_map)
         self.get_logger().info('localisation_node alive')
 
@@ -91,7 +86,7 @@ class LocalisationNode(Node):
         if self.map_loaded:
             return
 
-        wait_timeout = min(0.5, float(self.get_parameter('map_service_timeout_sec').value))
+        wait_timeout = min(0.5, self.MAP_SERVICE_TIMEOUT_SEC)
         if not self.map_client.wait_for_service(timeout_sec=wait_timeout):
             self.get_logger().info('waiting for /map_server/map service...')
             return
@@ -115,8 +110,7 @@ class LocalisationNode(Node):
             self.get_logger().error('GetMap returned no response')
             return
 
-        threshold = int(self.get_parameter('occupied_threshold').value)
-        self.grid_map = GridMap.from_msg(response.map, occupied_threshold=threshold)
+        self.grid_map = GridMap.from_msg(response.map, occupied_threshold=self.OCCUPIED_THRESHOLD)
         self.map_array = self.occupancy_grid_to_numpy(response.map)
         self.free_positions, self.wall_positions = self.extract_map_positions(response.map)
         self.knn_x, self.knn_y = self.build_knn_dataset(self.free_positions, self.wall_positions)
@@ -124,7 +118,7 @@ class LocalisationNode(Node):
         self.map_loaded = True
         self.map_timer.cancel()
 
-        neighbor_count = max(1, int(self.get_parameter('knn_neighbors').value))
+        neighbor_count = max(1, self.KNN_NEIGHBORS)
         self.knn_model = KNeighborsClassifier(n_neighbors=neighbor_count)
         self.knn_model.fit(self.knn_x, self.knn_y)
 
@@ -246,7 +240,7 @@ class LocalisationNode(Node):
         # Convert the LaserScan from polar (range at each beam angle) to cartesian
         # (x, y) points in the robot frame. We take every `downsample`-th beam for
         # speed and drop invalid readings (inf/NaN or outside [range_min, range_max]).
-        downsample = max(1, int(self.get_parameter('scan_downsample_step').value))
+        downsample = max(1, self.SCAN_DOWNSAMPLE_STEP)
         ranges = np.asarray(msg.ranges, dtype=np.float32)
         indices = np.arange(0, len(ranges), downsample, dtype=np.int32)
         sampled_ranges = ranges[indices]

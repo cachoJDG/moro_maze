@@ -31,77 +31,69 @@ from moro_maze.control_utils import (
 
 
 class LocalPlannerNode(Node):
+    # --- Tuning constants (hardcoded; kept simple, no ROS parameters) -------
+    GLOBAL_PATH_TOPIC = '/global_path'
+    CMD_VEL_TOPIC = '/cmd_vel'
+    TRAJECTORY_TOPIC = '/local_trajectory'
+    GOAL_TOPIC = '/current_goal'
+
+    CONTROL_RATE = 5.0          # [Hz] control loop
+    SIM_TS = 0.2                # [s] forward-simulation sampling time
+    HORIZON = 12                # forward-sim steps
+    GOAL_TOLERANCE = 0.25       # [m] advance to the next waypoint
+    FINAL_GOAL_TOLERANCE = 0.20  # [m] stop at the last waypoint
+
+    # Velocity / acceleration limits for control generation.
+    V_MIN = 0.0
+    V_MAX = 0.22
+    W_MIN = -1.4
+    W_MAX = 1.4
+    V_ACC = 0.1
+    W_ACC = 1.0
+    V_STEP = 0.02
+    W_STEP = 0.1
+
+    # PT2 robot dynamics model.
+    PT2_T = 0.05
+    PT2_D = 0.8
+
+    # Cost weights. Q_THETA is 0: for following maze waypoints we care about
+    # reaching each POSITION, not its orientation. A non-zero Q_THETA makes the
+    # robot rotate in place at corners (the 90 deg heading error, squared,
+    # dominates the position error) instead of driving on.
+    Q_POS = 1.0
+    Q_THETA = 0.0
+    R_V = 0.05
+    R_W = 0.02
+
     def __init__(self):
         super().__init__('local_planner_node')
-        self.declare_parameter('global_path_topic', '/global_path')
-        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
-        self.declare_parameter('trajectory_topic', '/local_trajectory')
-        self.declare_parameter('goal_topic', '/current_goal')
-        self.declare_parameter('control_rate', 5.0)        # [Hz] control loop
-        self.declare_parameter('sim_ts', 0.2)              # [s] sim sampling time
-        self.declare_parameter('horizon', 12)              # forward-sim steps
-        self.declare_parameter('goal_tolerance', 0.25)     # [m] advance threshold
-        self.declare_parameter('final_goal_tolerance', 0.20)
-        # Velocity / acceleration limits for control generation.
-        self.declare_parameter('v_min', 0.0)
-        self.declare_parameter('v_max', 0.22)
-        self.declare_parameter('w_min', -1.4)
-        self.declare_parameter('w_max', 1.4)
-        self.declare_parameter('v_acc', 0.1)
-        self.declare_parameter('w_acc', 1.0)
-        self.declare_parameter('v_step', 0.02)
-        self.declare_parameter('w_step', 0.1)
-        # PT2 robot dynamics model.
-        self.declare_parameter('pt2_T', 0.05)
-        self.declare_parameter('pt2_D', 0.8)
-        # Cost weights. q_theta is 0 by default: for following maze waypoints we
-        # care about reaching each POSITION, not its orientation. A non-zero
-        # q_theta makes the robot rotate in place at corners (the 90 deg heading
-        # error, squared, dominates the position error) instead of driving on.
-        self.declare_parameter('q_pos', 1.0)
-        self.declare_parameter('q_theta', 0.0)
-        self.declare_parameter('r_v', 0.05)
-        self.declare_parameter('r_w', 0.02)
 
         self.global_path = []
         self.current_goal_index = 0
         self.last_control = np.array([0.0, 0.0])
         self.finished = False
 
-        q_pos = float(self.get_parameter('q_pos').value)
-        q_theta = float(self.get_parameter('q_theta').value)
-        self.Q = np.diag([q_pos, q_pos, q_theta])
-        self.R = np.diag([
-            float(self.get_parameter('r_v').value),
-            float(self.get_parameter('r_w').value),
-        ])
+        self.Q = np.diag([self.Q_POS, self.Q_POS, self.Q_THETA])
+        self.R = np.diag([self.R_V, self.R_W])
 
-        ts = float(self.get_parameter('sim_ts').value)
-        self.robot_pt2 = PT2Block(
-            ts=ts,
-            T=float(self.get_parameter('pt2_T').value),
-            D=float(self.get_parameter('pt2_D').value),
-        )
+        self.robot_pt2 = PT2Block(ts=self.SIM_TS, T=self.PT2_T, D=self.PT2_D)
 
         path_qos = QoSProfile(depth=1)
         path_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         path_qos.reliability = ReliabilityPolicy.RELIABLE
 
-        self.cmd_pub = self.create_publisher(
-            TwistStamped, self.get_parameter('cmd_vel_topic').value, 10)
-        self.traj_pub = self.create_publisher(
-            Path, self.get_parameter('trajectory_topic').value, 10)
-        self.goal_pub = self.create_publisher(
-            PoseStamped, self.get_parameter('goal_topic').value, 10)
+        self.cmd_pub = self.create_publisher(TwistStamped, self.CMD_VEL_TOPIC, 10)
+        self.traj_pub = self.create_publisher(Path, self.TRAJECTORY_TOPIC, 10)
+        self.goal_pub = self.create_publisher(PoseStamped, self.GOAL_TOPIC, 10)
 
         self.create_subscription(
-            Path, self.get_parameter('global_path_topic').value,
-            self.path_callback, path_qos)
+            Path, self.GLOBAL_PATH_TOPIC, self.path_callback, path_qos)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
 
-        control_rate = max(0.5, float(self.get_parameter('control_rate').value))
+        control_rate = max(0.5, self.CONTROL_RATE)
         self.create_timer(1.0 / control_rate, self.control_loop)
         self.get_logger().info('local_planner_node alive')
 
@@ -164,8 +156,8 @@ class LocalPlannerNode(Node):
             return
 
         # 2. Select the current goal, advancing over already-reached waypoints.
-        goal_tol = float(self.get_parameter('goal_tolerance').value)
-        final_tol = float(self.get_parameter('final_goal_tolerance').value)
+        goal_tol = self.GOAL_TOLERANCE
+        final_tol = self.FINAL_GOAL_TOLERANCE
         last_index = len(self.global_path) - 1
 
         while self.current_goal_index < last_index:
@@ -201,23 +193,18 @@ class LocalPlannerNode(Node):
         # 4. Generate candidate controls.
         controls = generateControls(
             self.last_control,
-            v_min=float(self.get_parameter('v_min').value),
-            v_max=float(self.get_parameter('v_max').value),
-            w_min=float(self.get_parameter('w_min').value),
-            w_max=float(self.get_parameter('w_max').value),
-            v_acc=float(self.get_parameter('v_acc').value),
-            w_acc=float(self.get_parameter('w_acc').value),
-            v_step=float(self.get_parameter('v_step').value),
-            w_step=float(self.get_parameter('w_step').value),
+            v_min=self.V_MIN, v_max=self.V_MAX,
+            w_min=self.W_MIN, w_max=self.W_MAX,
+            v_acc=self.V_ACC, w_acc=self.W_ACC,
+            v_step=self.V_STEP, w_step=self.W_STEP,
         )
         if len(controls) == 0:
             return
 
         # 5. Forward-simulate and score.
-        ts = float(self.get_parameter('sim_ts').value)
-        horizon = int(self.get_parameter('horizon').value)
         costs, trajectories = evaluateControls(
-            controls, self.robot_pt2, rel_goal, horizon, ts, Q=self.Q, R=self.R)
+            controls, self.robot_pt2, rel_goal, self.HORIZON, self.SIM_TS,
+            Q=self.Q, R=self.R)
 
         # 6. Pick the lowest-cost control.
         best_idx = int(np.argmin(costs))
