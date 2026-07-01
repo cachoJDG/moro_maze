@@ -97,17 +97,6 @@ source install/setup.bash
 ros2 launch moro_maze simulation_launch.py
 ```
 
-## Run Result
-
-The complete pipeline is working when the logs show:
-
-```text
-initial localisation result: ...
-detected exits: ...
-bfs found path: ...
-local planner received global path: ...
-local planner: final goal reached ..., robot stopped
-```
 
 ## Implemented Software
 

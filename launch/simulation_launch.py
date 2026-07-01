@@ -15,15 +15,17 @@ def generate_launch_description():
     ros_gz_sim_dir = get_package_share_directory('ros_gz_sim')
     tb_nav2_bringup_dir = get_package_share_directory('turtlebot3_navigation2')
     
-    ## FIND CONFIG FILES
+    # Configuration files.
     world_path = os.path.join(moro_maze_dir, 'worlds', 'default_gzsim.world')
     map_yaml_path = os.path.join(moro_maze_dir, 'maps', 'map.yaml')
     rviz_config_file = os.path.join(moro_maze_dir, 'rviz', 'config.rviz')
 
     params_file_path = os.path.join(tb_nav2_bringup_dir, 'param', 'burger.yaml')
-    #params_file_path = os.path.join(moro_maze_dir, 'params', 'nav2_params.yaml') ## Humble params -> Cause tf error on Jazzy
+    # params_file_path = os.path.join(moro_maze_dir, 'params', 'nav2_params.yaml')
+    # The Humble parameter file causes a TF error on Jazzy, so the TurtleBot3
+    # navigation parameters are used instead.
     
-    ## GAZEBO
+    # Gazebo simulation.
     gzserver_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(ros_gz_sim_dir, 'launch', 'gz_sim.launch.py')
@@ -44,7 +46,7 @@ def generate_launch_description():
             get_package_share_directory('turtlebot3_gazebo'),
             'models'))
 
-    ## SPAWN ROBOT
+    # Robot spawn and state publisher.
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     x_pose = LaunchConfiguration('x_pose', default='2.0')
     y_pose = LaunchConfiguration('y_pose', default='1.0')
@@ -68,7 +70,7 @@ def generate_launch_description():
         }.items()
     )
 
-    ## NAV 2
+    # Nav2 map server, AMCL, and RViz.
     nav2_bringup_cmd = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(
         os.path.join(nav2_launch_dir, 'bringup_launch.py')),
@@ -122,7 +124,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        gzserver_cmd, #gzclient_cmd, # comment out gzclient_cmd to omit the graphical simulation and save performance
+        gzserver_cmd,  # Enable gzclient_cmd here for a graphical Gazebo client.
         spawn_turtlebot_cmd, robot_state_publisher_cmd, set_env_vars_resources,
         nav2_bringup_cmd, rviz_cmd,
         localisation_node_cmd, global_planner_node_cmd, local_planner_node_cmd,
