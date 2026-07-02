@@ -24,7 +24,6 @@ The solution combines:
 | `moro_maze/localisation_node.py` | Estimates the initial robot pose from the first laser scan. |
 | `moro_maze/global_planner_node.py` | Builds the graph, detects maze exits, runs BFS, and publishes the global path. |
 | `moro_maze/local_planner_node.py` | Follows the global path with a forward-simulation local controller. |
-| `moro_maze/local_controller_node.py` | Older Nav2 action-based waypoint follower kept as fallback/reference. |
 | `moro_maze/map_utils.py` | Occupancy-grid helper functions and exit detection. |
 | `moro_maze/search_utils.py` | Graph, Bresenham line checks, BFS, and path expansion utilities. |
 | `moro_maze/control_utils.py` | MORO control utilities: transforms, control generation, forward kinematics, PT2 model, and cost function. |
@@ -259,7 +258,6 @@ material referenced in the assignment.
 | Detect openings in the actual wall shell | The map has a free outer padding ring, so scanning only the outer border gives false exits. |
 | Densify the global path | Sparse graph waypoints are too far apart for smooth local control. |
 | Set `Q_THETA = 0` | The robot should follow waypoint positions through the maze instead of rotating to match every intermediate heading. |
-| Keep `local_controller_node.py` | It documents the earlier Nav2 action-based approach and remains available as fallback/reference, but it is not used by the launch file. |
 
 ## Known Limitations
 
@@ -285,22 +283,3 @@ For valid assignment spawn positions, the expected behavior is:
 7. The local planner follows the path by publishing `/cmd_vel`.
 8. The robot exits or reaches the final doorway waypoint.
 9. The local planner publishes a zero command and reports that the robot stopped.
-
-## Tests and Checks
-
-The package includes the default ROS Python package tests:
-
-- `test/test_copyright.py`
-- `test/test_flake8.py`
-- `test/test_pep257.py`
-
-Run them from the workspace with:
-
-```bash
-colcon test --packages-select moro_maze
-colcon test-result --verbose
-```
-
-These tests check package style and documentation conventions. Functional
-validation should be done by running the simulation and checking the topics/logs
-listed above.
